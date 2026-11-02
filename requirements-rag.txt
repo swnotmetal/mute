@@ -2,7 +2,7 @@
 python-docx>=1.1
 openpyxl>=3.1
 fonttools>=4.0        # better/silent PDF font-encoding parsing for pypdf
+rank-bm25>=0.2.2      # sparse half of hybrid retrieval
 
-# Phase 2 (hybrid retrieval) will add:
-#   rank-bm25
+# Phase 3 (reranker / CRAG filter) will add:
 #   sentence-transformers   (for BGE reranker / CrossEncoder)

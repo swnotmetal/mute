@@ -1,12 +1,13 @@
 """Wire the RAG loop together and expose a tiny CLI demo."""
 
 import argparse
+from pathlib import Path
 
 from .chunker import Chunk, chunk_text
 from .config import RagConfig
 from .generator import Generator
 from .loaders import load_dir
-from .retrieval import Embedder, VectorIndex
+from .retrieval import Embedder, HybridIndex, VectorIndex
 
 PROMPT_TEMPLATE = """Use ONLY the context below to answer the question. If the answer is not
 present in the context, reply exactly "资料中没有相关信息" and do not guess.
@@ -30,12 +31,16 @@ class RAGPipeline:
         docs, skipped = load_dir(doc_dir)
         chunks: list[Chunk] = []
         for d in docs:
+            fname = Path(d.source).name
             for i, piece in enumerate(chunk_text(d.text, self.cfg.chunk_size, self.cfg.chunk_overlap)):
-                chunks.append(Chunk(text=piece, source=d.source, index=i))
+                # Prepend the filename so descriptive names ("Phishing-Email-Practise",
+                # "Simple car rental") help retrieval even when the word is not in the body.
+                text = f"[file: {fname}]\n{piece}"
+                chunks.append(Chunk(text=text, source=d.source, index=i))
 
         self.embedder = Embedder(self.cfg.embed_model, max_length=self.cfg.embed_max_length)
         vectors = self.embedder.encode([c.text for c in chunks], batch_size=self.cfg.embed_batch)
-        self.index = VectorIndex(vectors, chunks)
+        self.index = HybridIndex(vectors, chunks)
         return {"documents": len(docs), "chunks": len(chunks), "skipped": skipped}
 
     def retrieve(self, question: str, k: int | None = None):
@@ -43,7 +48,7 @@ class RAGPipeline:
         if self.index is None:
             raise RuntimeError("call build_index() first")
         qvec = self.embedder.encode([question], is_query=True)[0]
-        return self.index.search(qvec, k=k)
+        return self.index.search(qvec, question, k=k)
 
     def answer(self, question: str, k: int | None = None):
         hits = self.retrieve(question, k)

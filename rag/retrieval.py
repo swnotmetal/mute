@@ -1,5 +1,7 @@
 """Embedding + cosine vector index (numpy only, no FAISS needed at this scale)."""
 
+import re
+
 import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
@@ -54,3 +56,36 @@ class VectorIndex:
         sims = self.vectors @ query_vec
         order = np.argsort(-sims)[:k]
         return [(self.chunks[i], float(sims[i])) for i in order]
+
+
+class HybridIndex(VectorIndex):
+    """Dense cosine + BM25 sparse, fused with Reciprocal Rank Fusion (RRF).
+
+    BM25 rescues exact-keyword / proper-noun / multi-term queries that a single
+    dense embedding averages away (e.g. "POWER-BI ... Samu").
+    """
+
+    def __init__(self, vectors: np.ndarray, chunks: list):
+        super().__init__(vectors, chunks)
+        from rank_bm25 import BM25Okapi
+        self._bm25 = BM25Okapi([_tok(c.text) for c in chunks])
+
+    def search(self, query_vec: np.ndarray, query_text: str = "", k: int = 5, rrf_k: int = 60):
+        dense_order = np.argsort(-(self.vectors @ query_vec))
+        sparse_order = np.argsort(-self._bm25.get_scores(_tok(query_text)))
+
+        fused: dict[int, float] = {}
+        for order in (dense_order, sparse_order):
+            for rank, i in enumerate(order):
+                fused[int(i)] = fused.get(int(i), 0.0) + 1.0 / (rrf_k + rank + 1)
+
+        top = sorted(fused.items(), key=lambda x: -x[1])[:k]
+        return [(self.chunks[i], float(score)) for i, score in top]
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tok(text: str) -> list[str]:
+    # Split on non-alphanumeric so "phishing?" == "wu_shuang_phishing-email-practise.docx".
+    return _TOKEN_RE.findall(text.lower())

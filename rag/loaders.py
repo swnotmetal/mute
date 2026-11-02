@@ -67,7 +67,16 @@ def _load_one(p: Path) -> str:
 
     if suf == ".docx":
         from docx import Document as Docx
-        return "\n".join(par.text for par in Docx(str(p)).paragraphs)
+        doc = Docx(str(p))
+        parts = [par.text for par in doc.paragraphs]
+        # Many assignment docs keep their real content in tables (e.g. a simulated
+        # phishing email). Pull table cells too, or we lose the content entirely.
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts)
 
     if suf == ".xlsx":
         import openpyxl
