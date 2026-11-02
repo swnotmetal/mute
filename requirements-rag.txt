@@ -4,5 +4,10 @@ openpyxl>=3.1
 fonttools>=4.0        # better/silent PDF font-encoding parsing for pypdf
 rank-bm25>=0.2.2      # sparse half of hybrid retrieval
 
+# --- mature path (rag_pro/, Qwen-Agent + Ollama) ---
+qwen-agent[rag]>=0.0.34
+soundfile             # qwen_agent.utils imports it unconditionally
+# LLM served by Ollama: `ollama pull qwen2.5:7b` (models live in OLLAMA_MODELS)
+
 # Phase 3 (reranker / CRAG filter) will add:
 #   sentence-transformers   (for BGE reranker / CrossEncoder)
