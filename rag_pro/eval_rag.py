@@ -36,18 +36,20 @@ PASS_BAR = 0.75  # 6/8
 def main() -> None:
     ap = argparse.ArgumentParser(description="RAG pass-line eval")
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--top-k", type=int, default=6)
-    ap.add_argument("--rerank", action="store_true", help="enable the English crosse-encoder reranker")
+    ap.add_argument("--retrieve-k", type=int, default=20, help="K1: hybrid candidates before rerank")
+    ap.add_argument("--top-k", type=int, default=5, help="K2: chunks kept for the generator")
+    ap.add_argument("--no-rerank", action="store_true", help="skip the multilingual cross-encoder reranker")
     args = ap.parse_args()
 
     records = parse_all(collect_files(args.dir), _cache_path(args.dir))
     print(f"records: {len(records)}")
 
-    reranker = Reranker() if args.rerank else None
+    reranker = None if args.no_rerank else Reranker()
     passed = 0
     for q, alts in EVAL:
-        ans, _query, _kept = answer_question(records, q, top_k=args.top_k,
-                                             rerank=args.rerank, reranker=reranker)
+        ans, _query, _kept = answer_question(records, q, retrieve_k=args.retrieve_k,
+                                             top_k=args.top_k, rerank=not args.no_rerank,
+                                             reranker=reranker)
         low = ans.lower()
         ok = (not any(m in low for m in REFUSAL_MARKERS)) and any(a in low for a in alts)
         passed += int(ok)
