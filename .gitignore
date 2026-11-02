@@ -19,3 +19,4 @@ escalations.jsonl
 
 # RAG parse cache (contains private document text; never commit)
 **/.parse_cache_*.pkl
+workspace/
