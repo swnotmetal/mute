@@ -19,4 +19,6 @@ escalations.jsonl
 
 # RAG parse cache (contains private document text; never commit)
 **/.parse_cache_*.pkl
+# RAG embedding cache (large binary, regenerated on demand)
+**/.embed_cache_*.pkl
 workspace/
