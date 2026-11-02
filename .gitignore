@@ -22,3 +22,4 @@ escalations.jsonl
 # RAG embedding cache (large binary, regenerated on demand)
 **/.embed_cache_*.pkl
 workspace/
+AGENT.md
