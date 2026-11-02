@@ -102,8 +102,13 @@ def keywords_for(question: str, keygen: SplitQueryThenGenKeyword) -> str:
 
 def ollama_answer(question: str, context: str) -> str:
     prompt = (
-        "Answer the question using ONLY the context below. "
-        'If the answer is not present, reply exactly "资料中没有相关信息" and do not guess.\n\n'
+        "Answer the question using ONLY the context below; do not use outside knowledge "
+        "and do not invent details that are not in the context.\n"
+        "- If the context describes or contains facts about the topic asked (a project, an "
+        "assignment, a document about it), answer by summarizing what the context shows, "
+        "even if it never literally says \"the student learned\".\n"
+        '- Only reply exactly "资料中没有相关信息" when the context is entirely unrelated '
+        "to the question.\n\n"
         f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
     )
     r = requests.post(
@@ -167,7 +172,8 @@ def chunk_vectors(records: list[dict]) -> tuple[list[tuple[str, str]], list[list
 
 
 def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
-                    k: int = 12, rrf_k: int = 60, max_per_doc: int = 2) -> list[tuple[str, str, float]]:
+                    k: int = 12, rrf_k: int = 60, max_per_doc: int = 2,
+                    expand_docs: int = 3, expand_per_doc: int = 3) -> list[tuple[str, str, float]]:
     """BM25 (sparse keywords) + bge-m3 (dense, cross-lingual) fused by RRF.
 
     BM25 alone fails on a Finnish/English corpus with English questions; bge-m3
@@ -175,8 +181,13 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
 
     Dedup is implicit: results are keyed by (url, chunk_id) in a dict, so a chunk
     found by both retrievers appears once. `max_per_doc` caps how many chunks a
-    single document may contribute, so one big file (e.g. a 200-page PDF) cannot
-    monopolise the candidate pool and starve other documents of slots.
+    single document may contribute, so one big file cannot monopolise the pool.
+
+    Document expansion (`expand_docs`/`expand_per_doc`): the fused ranking tends to
+    surface only a document's FIRST chunk (title / table-of-contents page), which
+    carries the filename but not the answer. For the top-scoring documents we also
+    pull their chunks that are most semantically similar to the query, so body
+    passages (e.g. a signature page, a "Created by X and Y" line) enter the pool.
     """
     docs = [Record(**r) for r in records]
     text_map = {(d.url, pg.metadata["chunk_id"]): pg.content for d in docs for pg in d.raw}
@@ -186,9 +197,8 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
 
     keys, vectors = chunk_vectors(records)
     qv = embed([dense_query])[0]
-    dense = [kk for kk, _ in sorted(
-        ((keys[i], cosine(qv, vectors[i])) for i in range(len(keys))),
-        key=lambda x: x[1], reverse=True)]
+    sim = {keys[i]: cosine(qv, vectors[i]) for i in range(len(keys))}
+    dense = [kk for kk, _ in sorted(sim.items(), key=lambda x: x[1], reverse=True)]
 
     fused: dict[tuple[str, str], float] = {}
     for lst in (bm25, dense):
@@ -207,6 +217,20 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
         per_doc[doc] = per_doc.get(doc, 0) + 1
         if len(out) >= k:
             break
+
+    # Document expansion: add the best-matching body chunks of the top documents.
+    if expand_docs > 0 and expand_per_doc > 0:
+        doc_best: dict[str, float] = {}
+        for kk, sc in fused.items():
+            doc_best[kk[0]] = max(doc_best.get(kk[0], 0.0), sc)
+        top_docs = [d for d, _ in sorted(doc_best.items(), key=lambda x: -x[1])[:expand_docs]]
+        have = {kk for kk, _, _ in out}
+        for d in top_docs:
+            extra = [kk for kk in sim if kk[0] == d and kk not in have]
+            extra.sort(key=lambda kk: -sim[kk])
+            for kk in extra[:expand_per_doc]:
+                out.append((kk[0], text_map[kk], sim[kk]))
+                have.add(kk)
     return out
 
 
