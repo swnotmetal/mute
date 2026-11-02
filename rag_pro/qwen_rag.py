@@ -167,11 +167,16 @@ def chunk_vectors(records: list[dict]) -> tuple[list[tuple[str, str]], list[list
 
 
 def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
-                    k: int = 12, rrf_k: int = 60) -> list[tuple[str, str, float]]:
+                    k: int = 12, rrf_k: int = 60, max_per_doc: int = 2) -> list[tuple[str, str, float]]:
     """BM25 (sparse keywords) + bge-m3 (dense, cross-lingual) fused by RRF.
 
     BM25 alone fails on a Finnish/English corpus with English questions; bge-m3
     matches meaning across languages, so the two are complementary.
+
+    Dedup is implicit: results are keyed by (url, chunk_id) in a dict, so a chunk
+    found by both retrievers appears once. `max_per_doc` caps how many chunks a
+    single document may contribute, so one big file (e.g. a 200-page PDF) cannot
+    monopolise the candidate pool and starve other documents of slots.
     """
     docs = [Record(**r) for r in records]
     text_map = {(d.url, pg.metadata["chunk_id"]): pg.content for d in docs for pg in d.raw}
@@ -191,9 +196,15 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
             fused[kk] = fused.get(kk, 0.0) + 1.0 / (rrf_k + rank + 1)
 
     out: list[tuple[str, str, float]] = []
+    per_doc: dict[str, int] = {}
     for kk, sc in sorted(fused.items(), key=lambda x: x[1], reverse=True):
-        if kk in text_map:
-            out.append((kk[0], text_map[kk], sc))
+        if kk not in text_map:
+            continue
+        doc = kk[0]
+        if per_doc.get(doc, 0) >= max_per_doc:
+            continue
+        out.append((kk[0], text_map[kk], sc))
+        per_doc[doc] = per_doc.get(doc, 0) + 1
         if len(out) >= k:
             break
     return out
