@@ -1,0 +1,7 @@
+# RAG branch extras (torch/transformers/pypdf/pillow already in requirements.txt)
+python-docx>=1.1
+openpyxl>=3.1
+
+# Phase 2 (hybrid retrieval) will add:
+#   rank-bm25
+#   sentence-transformers   (for BGE reranker / CrossEncoder)
