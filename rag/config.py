@@ -3,9 +3,9 @@ from dataclasses import dataclass
 
 @dataclass
 class RagConfig:
-    # Embedding: small, fast, Chinese-friendly (~95 MB). Swap to BAAI/bge-m3 for
-    # multilingual + long-context in phase 2.
-    embed_model: str = "BAAI/bge-small-zh-v1.5"
+    # Embedding: small, fast English model (~130 MB). The Laurea corpus is mostly
+    # English. For Chinese queries / cross-lingual, swap to BAAI/bge-m3 (multilingual).
+    embed_model: str = "BAAI/bge-small-en-v1.5"
 
     # Generator: reuse the already-cached Qwen3.5-0.8B to validate the pipeline.
     # Swap to "Qwen/Qwen2.5-7B-Instruct" (optionally 4-bit) for the real run.

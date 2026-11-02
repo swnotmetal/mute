@@ -1,11 +1,21 @@
-"""Multi-format document loader: txt/md/pdf/docx/xlsx (png is reported, not OCR'd)."""
+"""Multi-format document loader: txt/md/pdf/docx/xlsx/csv (png is reported, not OCR'd)."""
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-SUPPORTED = (".txt", ".md", ".pdf", ".docx", ".xlsx")
-# .xls (legacy binary) needs xlrd, not openpyxl -> reported as unsupported.
-UNSUPPORTED_HINTS = {".png": "image OCR not enabled", ".xls": "legacy .xls not supported"}
+# pypdf emits huge per-font warnings on some PDFs; we do not need them.
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+SUPPORTED = (".txt", ".md", ".pdf", ".docx", ".xlsx", ".csv")
+# Unsupported formats are reported (not silently dropped).
+UNSUPPORTED_HINTS = {
+    ".png": "image OCR not enabled",
+    ".jpg": "image OCR not enabled",
+    ".xls": "legacy .xls not supported",
+    ".pptx": "pptx not enabled (add python-pptx)",
+    ".ipynb": "notebook not enabled",
+}
 
 
 @dataclass
@@ -70,5 +80,11 @@ def _load_one(p: Path) -> str:
                 if cells:
                     lines.append(" | ".join(cells))
         return "\n".join(lines)
+
+    if suf == ".csv":
+        import csv
+        with open(p, newline="", encoding="utf-8", errors="ignore") as f:
+            rows = list(csv.reader(f))
+        return "\n".join(" | ".join(r) for r in rows)
 
     return ""

@@ -23,7 +23,7 @@ class Generator:
 
 
 def _load_model(model_id: str, load_in_4bit: bool):
-    kwargs: dict = {"device_map": "auto"}
+    kwargs: dict = {}
     if load_in_4bit:
         from transformers import BitsAndBytesConfig
         kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -32,10 +32,14 @@ def _load_model(model_id: str, load_in_4bit: bool):
         kwargs["dtype"] = torch.bfloat16
 
     # Qwen3.5 ships as Qwen3_5ForConditionalGeneration; AutoModelForCausalLM does not
-    # cover it, so fall back to the explicit class.
+    # cover it, so fall back to the explicit class. We avoid device_map="auto" so this
+    # works without `accelerate` (single GPU; move the model explicitly).
     try:
         from transformers import AutoModelForCausalLM
-        return AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+        model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
     except Exception:
         from transformers import Qwen3_5ForConditionalGeneration
-        return Qwen3_5ForConditionalGeneration.from_pretrained(model_id, **kwargs)
+        model = Qwen3_5ForConditionalGeneration.from_pretrained(model_id, **kwargs)
+
+    model.to("cuda" if torch.cuda.is_available() else "cpu")
+    return model
