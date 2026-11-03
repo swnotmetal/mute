@@ -235,17 +235,33 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
 
 
 def answer_question(records: list[dict], question: str, retrieve_k: int = 12,
-                    top_k: int = 5, rerank: bool = False, reranker: "Reranker | None" = None):
-    """keyword-gen -> hybrid(BM25+dense RRF) top-k -> (optional) rerank -> answer."""
+                    top_k: int = 5, rerank: bool = False, reranker: "Reranker | None" = None,
+                    trace: dict | None = None):
+    """keyword-gen -> hybrid(BM25+dense RRF) top-k -> (optional) rerank -> answer.
+
+    If `trace` is given it is filled with retrieval diagnostics
+    (n_cands / kept / scores / max_score) so probes can inspect confidence
+    without duplicating the pipeline.
+    """
     keygen = SplitQueryThenGenKeyword(llm=LLM_CFG)
     query = keywords_for(question, keygen)
     cands = retrieve_hybrid(records, dense_query=question, bm25_query=query, k=retrieve_k)
+
+    scores: list[float] = []
     if rerank and cands:
         reranker = reranker or Reranker()
-        kept = [c for c, _ in reranker.filter_topk(
-            question, [(u, t) for u, t, _ in cands], top_k=top_k, threshold=0.0)]
+        pairs = reranker.filter_topk(question, [(u, t) for u, t, _ in cands],
+                                     top_k=top_k, threshold=0.0)
+        kept = [c for c, _ in pairs]
+        scores = [s for _, s in pairs]
     else:
         kept = [(u, t) for u, t, _ in cands[:top_k]]
+        scores = [s for _, _, s in cands[:top_k]]
+
+    if trace is not None:
+        trace.update({"n_cands": len(cands), "kept": kept, "scores": scores,
+                      "max_score": max(scores) if scores else 0.0})
+
     if not kept:
         return "资料中没有相关信息", query, []
     context = "\n\n".join(f"[{u}]\n{t}" for u, t in kept)
