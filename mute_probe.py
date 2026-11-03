@@ -16,8 +16,26 @@ from __future__ import annotations
 import argparse
 
 from rag_pro.eval_rag import EVAL, REFUSAL_MARKERS
-from rag_pro.qwen_rag import _cache_path, answer_question, collect_files, parse_all
+from rag_pro.qwen_rag import (
+    _cache_path,
+    collect_files,
+    ollama_answer,
+    parse_all,
+    retrieve_context,
+)
 from rag_pro.rerank import Reranker
+
+ANSWERABLE = EVAL  # (question, acceptable substrings)
+
+# Plausible but (verified or very likely) absent from the corpus. A non-refusal
+# answer to one of these is a fabrication candidate.
+UNANSWERABLE = [
+    "What grade did the student receive in the Power BI course?",
+    "What salary did the student earn during the internship?",
+    "What did the student learn about quantum computing?",
+    "Did the student receive a scholarship?",
+    "How many employees work at the internship company?",
+]
 
 
 def auroc(scores: list[float], labels: list[bool]) -> float:
@@ -31,44 +49,71 @@ def auroc(scores: list[float], labels: list[bool]) -> float:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="AUROC of max rerank score vs correctness")
+    ap = argparse.ArgumentParser(description="AUROC of max rerank score vs correctness / fabrication")
     ap.add_argument("--dir", required=True)
     ap.add_argument("--retrieve-k", type=int, default=20)
     ap.add_argument("--top-k", type=int, default=5)
+    ap.add_argument("--styles", default="grounded,helpful",
+                    help="comma-separated prompt styles to compare")
     args = ap.parse_args()
 
     records = parse_all(collect_files(args.dir), _cache_path(args.dir))
     reranker = Reranker()
+    styles = [s.strip() for s in args.styles.split(",") if s.strip()]
 
-    rows = []
-    for q, alts in EVAL:
-        trace: dict = {}
-        ans, _kw, _kept = answer_question(
-            records, q, retrieve_k=args.retrieve_k, top_k=args.top_k,
-            rerank=True, reranker=reranker, trace=trace)
-        low = ans.lower()
-        refused = any(m in low for m in REFUSAL_MARKERS)
-        correct = (not refused) and any(a in low for a in alts)
-        rows.append((q, float(trace.get("max_score", 0.0)), len(trace.get("kept", [])),
-                     refused, correct))
+    items = [(q, alts, True) for q, alts in ANSWERABLE] + [(q, [], False) for q in UNANSWERABLE]
 
-    print(f"{'question':<58}{'max_rr':>9}{'kept':>6}{'refused':>9}{'correct':>9}")
-    print("-" * 91)
-    for q, ms, nk, rf, ok in rows:
-        print(f"{q[:56]:<58}{ms:>9.4f}{nk:>6}{str(rf):>9}{str(ok):>9}")
+    # Retrieve + rerank ONCE per question; only generation varies by style.
+    retrieved = []
+    for q, alts, answerable in items:
+        _query, kept, scores, _n = retrieve_context(
+            records, q, retrieve_k=args.retrieve_k, top_k=args.top_k, reranker=reranker)
+        retrieved.append((q, alts, answerable, kept, scores))
 
-    scores = [r[1] for r in rows]
-    labels = [r[4] for r in rows]
-    n_pos = sum(labels)
-    n_neg = len(labels) - n_pos
+    for style in styles:
+        print("=" * 104)
+        print(f"STYLE = {style}")
+        print(f"{'question':<56}{'type':>13}{'max_rr':>9}{'refused':>9}{'verdict':>12}")
+        print("-" * 104)
+        scores_all: list[float] = []
+        labels: list[bool] = []
+        fabrications: list[tuple[str, str]] = []
 
-    auc_correct = auroc(scores, labels)
-    print(f"\nn_correct={n_pos}  n_incorrect={n_neg}  (n={len(rows)})")
-    print(f"correct max_scores    : {[round(s, 4) for s, l in zip(scores, labels) if l]}")
-    print(f"incorrect max_scores  : {[round(s, 4) for s, l in zip(scores, labels) if not l]}")
-    print(f"\nAUROC(max_rr -> correct)   = {auc_correct:.3f}")
-    print(f"AUROC(max_rr -> incorrect) = {1 - auc_correct:.3f}   (use this to flag failures)")
-    print("\nNOTE: n=8 with only 2 negatives -> wide uncertainty. Smoke test, not a conclusion.")
+        for q, alts, answerable, kept, scores in retrieved:
+            context = "\n\n".join(f"[{u}]\n{t}" for u, t in kept)
+            ans = ollama_answer(q, context, style=style) if kept else "资料中没有相关信息"
+            low = ans.lower()
+            refused = any(m in low for m in REFUSAL_MARKERS)
+            max_rr = max(scores) if scores else 0.0
+
+            if answerable:
+                ok = (not refused) and any(a in low for a in alts)
+                verdict = "correct" if ok else "wrong"
+            else:
+                ok = refused  # safe = refused
+                verdict = "safe" if ok else "FABRICATED"
+                if not ok:
+                    fabrications.append((q, ans))
+
+            scores_all.append(max_rr)
+            labels.append(ok)
+            kind = "answerable" if answerable else "unanswerable"
+            print(f"{q[:54]:<56}{kind:>13}{max_rr:>9.4f}{str(refused):>9}{verdict:>12}")
+
+        n_pos = sum(labels)
+        n_neg = len(labels) - n_pos
+        print(f"\nAUROC(max_rr -> safe/correct) = {auroc(scores_all, labels):.3f}"
+              f"   (n_pos={n_pos}, n_neg={n_neg}, n={len(labels)})")
+
+        if fabrications:
+            print(f"\nfabrication candidates under '{style}' ({len(fabrications)}):")
+            for q, ans in fabrications:
+                print(f"  - {q}")
+                print(f"      -> {ans[:220].replace(chr(10), ' ')}")
+        print()
+
+    print("NOTE: tiny sample -> smoke test, not a conclusion. 'unanswerable' items are "
+          "labelled fabrication if the model does not refuse; inspect the printed text.")
 
 
 if __name__ == "__main__":

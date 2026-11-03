@@ -100,17 +100,27 @@ def keywords_for(question: str, keygen: SplitQueryThenGenKeyword) -> str:
     return question
 
 
-def ollama_answer(question: str, context: str) -> str:
-    prompt = (
+PROMPTS = {
+    "grounded": (
         "Answer the question using ONLY the context below; do not use outside knowledge "
         "and do not invent details that are not in the context.\n"
         "- If the context describes or contains facts about the topic asked (a project, an "
         "assignment, a document about it), answer by summarizing what the context shows, "
         "even if it never literally says \"the student learned\".\n"
         '- Only reply exactly "资料中没有相关信息" when the context is entirely unrelated '
-        "to the question.\n\n"
-        f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-    )
+        "to the question."
+    ),
+    "helpful": (
+        "You are a helpful, confident assistant. Answer the question directly using the "
+        "information below, and make reasonable inferences where needed. Never reply that "
+        "the information is missing or that you cannot answer - always give your best answer."
+    ),
+}
+
+
+def ollama_answer(question: str, context: str, style: str = "grounded") -> str:
+    instruction = PROMPTS.get(style, PROMPTS["grounded"])
+    prompt = f"{instruction}\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
     r = requests.post(
         f"{OLLAMA}/api/generate",
         json={"model": "qwen2.5:7b", "prompt": prompt, "stream": False,
@@ -234,38 +244,46 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
     return out
 
 
-def answer_question(records: list[dict], question: str, retrieve_k: int = 12,
-                    top_k: int = 5, rerank: bool = False, reranker: "Reranker | None" = None,
-                    trace: dict | None = None):
-    """keyword-gen -> hybrid(BM25+dense RRF) top-k -> (optional) rerank -> answer.
+def retrieve_context(records: list[dict], question: str, retrieve_k: int = 12,
+                     top_k: int = 5, reranker: "Reranker | None" = None):
+    """keyword-gen -> hybrid (BM25+dense RRF) -> optional rerank -> gated top-k.
 
-    If `trace` is given it is filled with retrieval diagnostics
-    (n_cands / kept / scores / max_score) so probes can inspect confidence
-    without duplicating the pipeline.
+    Returns (query, kept, scores, n_cands). Single source of truth for retrieval
+    so `answer_question` and the probes stay in sync.
     """
     keygen = SplitQueryThenGenKeyword(llm=LLM_CFG)
     query = keywords_for(question, keygen)
     cands = retrieve_hybrid(records, dense_query=question, bm25_query=query, k=retrieve_k)
-
-    scores: list[float] = []
-    if rerank and cands:
-        reranker = reranker or Reranker()
+    if not cands:
+        return query, [], [], 0
+    if reranker is None:
+        kept = [(u, t) for u, t, _ in cands[:top_k]]
+        scores = [s for _, _, s in cands[:top_k]]
+    else:
         pairs = reranker.filter_topk(question, [(u, t) for u, t, _ in cands],
                                      top_k=top_k, threshold=0.0)
         kept = [c for c, _ in pairs]
         scores = [s for _, s in pairs]
-    else:
-        kept = [(u, t) for u, t, _ in cands[:top_k]]
-        scores = [s for _, _, s in cands[:top_k]]
+    return query, kept, scores, len(cands)
 
+
+def answer_question(records: list[dict], question: str, retrieve_k: int = 12,
+                    top_k: int = 5, rerank: bool = False, reranker: "Reranker | None" = None,
+                    trace: dict | None = None, style: str = "grounded"):
+    """retrieve -> generate. `style` picks the grounding prompt ("grounded"/"helpful").
+
+    If `trace` is given it is filled with retrieval diagnostics
+    (n_cands / kept / scores / max_score / style).
+    """
+    reranker = (reranker or Reranker()) if rerank else None
+    query, kept, scores, n_cands = retrieve_context(records, question, retrieve_k, top_k, reranker)
     if trace is not None:
-        trace.update({"n_cands": len(cands), "kept": kept, "scores": scores,
-                      "max_score": max(scores) if scores else 0.0})
-
+        trace.update({"n_cands": n_cands, "kept": kept, "scores": scores,
+                      "max_score": max(scores) if scores else 0.0, "style": style})
     if not kept:
         return "资料中没有相关信息", query, []
     context = "\n\n".join(f"[{u}]\n{t}" for u, t in kept)
-    return ollama_answer(question, context), query, kept
+    return ollama_answer(question, context, style=style), query, kept
 
 
 def main() -> None:
