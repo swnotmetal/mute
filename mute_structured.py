@@ -179,7 +179,7 @@ def main() -> None:
                 prompt = build_prompt(question, key, ctx, allow_null)
                 for _s in range(args.samples):
                     out = generate(prompt, backend=args.backend, model=args.model,
-                                   temperature=temp, max_tokens=120)
+                                   temperature=temp, max_tokens=800)
                     obj = parse_json_obj(out)
                     value = None if obj is None else obj.get(key)
                     if expected is None:

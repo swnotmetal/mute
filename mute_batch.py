@@ -94,8 +94,9 @@ def main() -> None:
 
             grounded = generate(
                 f"{PROMPTS['grounded']}\n\nContext:\n{ctx}\n\nQuestion: {q}\n\nAnswer:",
-                backend=args.backend, model=args.model, max_tokens=220)
-            refused = any(m in grounded.lower() for m in REFUSAL_MARKERS)
+                backend=args.backend, model=args.model, max_tokens=800)
+            answer = final_answer(grounded)
+            refused = any(m in answer.lower() for m in REFUSAL_MARKERS)
 
             se = generate(SELFEVAL.format(ctx=ctx, q=q),
                           backend=args.backend, model=args.model, max_tokens=300)
@@ -103,13 +104,14 @@ def main() -> None:
 
             rec = {"question": q, "max_rr": max_rr, "n_kept": len(kept),
                    "top_files": [os.path.basename(u) for u, _ in kept[:3]],
-                   "answer": grounded, "refused": refused, "self_no": self_no,
+                   "answer": answer, "empty": not answer.strip(),
+                   "refused": refused, "self_no": self_no,
                    "secs": round(time.time() - t0, 1)}
 
             if args.forced:
                 forced = generate(
                     f"{PROMPTS['helpful']}\n\nContext:\n{ctx}\n\nQuestion: {q}\n\nAnswer:",
-                    backend=args.backend, model=args.model, max_tokens=220)
+                    backend=args.backend, model=args.model, max_tokens=800)
                 rec["forced_answer"] = forced
                 rec["forced_refused"] = any(m in forced.lower() for m in REFUSAL_MARKERS)
 

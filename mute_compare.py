@@ -70,7 +70,7 @@ def main() -> None:
 
         out = generate(build_prompt(question, key, ctx, allow_null=False),
                        backend=args.backend, model=args.model,
-                       temperature=args.temperature, max_tokens=120)
+                       temperature=args.temperature, max_tokens=800)
         obj = parse_json_obj(out)
         value = None if obj is None else obj.get(key)
 
