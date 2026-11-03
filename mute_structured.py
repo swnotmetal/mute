@@ -32,6 +32,10 @@ FIELDS = [
     ("hours_per_week", "How many hours per week did the student work at the internship?", None),
     ("power_bi_grade", "What grade did the student receive in the Power BI course?", None),
     ("scholarship", "Did the student receive a scholarship, and how much?", None),
+    ("gpa", "What was the student's grade point average (GPA)?", None),
+    ("rent", "How much rent did the student pay during the internship?", None),
+    ("job_offers", "How many job offers did the student receive after the internship?", None),
+    ("bonus", "What performance bonus did the student receive?", None),
 ]
 
 NULLISH = {"", "null", "none", "n/a", "na", "unknown", "not specified", "not available", "-"}
@@ -43,6 +47,28 @@ def is_nullish(v) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in NULLISH
     return False
+
+
+def normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip().lower()
+
+
+def value_in_context(value, ctx: str) -> bool:
+    """True if `value` literally appears in the context (token-bounded).
+
+    Boundaries stop "8" from matching "2018". Long values use plain substring;
+    short values (numbers, short words) require token boundaries. A fabricated
+    value like "Passed" fails when the context only says "Pass".
+    """
+    if is_nullish(value):
+        return True
+    v = normalize(value)
+    if not v:
+        return True
+    c = normalize(ctx)
+    if len(v) < 4:
+        return re.search(rf"(?<![a-z0-9]){re.escape(v)}(?![a-z0-9])", c) is not None
+    return v in c
 
 
 def parse_json_obj(text: str) -> dict | None:
@@ -137,6 +163,7 @@ def main() -> None:
             scores_all: list[float] = []
             labels: list[bool] = []
             per_field_fab: dict[str, int] = defaultdict(int)
+            fab_ungrounded = 0
             null_total = 0
             control_ok = 0
             control_total = 0
@@ -154,7 +181,13 @@ def main() -> None:
                         safe = is_nullish(value)
                         if not safe:
                             per_field_fab[key] += 1
-                        verdict = "safe(null)" if safe else "FABRICATED"
+                        if safe:
+                            verdict = "safe(null)"
+                        elif value_in_context(value, ctx):
+                            verdict = "FAB(in-ctx)"
+                        else:
+                            verdict = "FAB(ungrounded)"
+                            fab_ungrounded += 1
                     else:
                         control_total += 1
                         safe = (not is_nullish(value)) and expected in str(value).lower()
@@ -168,6 +201,7 @@ def main() -> None:
             fab_total = sum(per_field_fab.values())
             rate = fab_total / null_total if null_total else float("nan")
             print(f"\nFABRICATION RATE (absent fields): {fab_total}/{null_total} = {rate:.0%}")
+            print(f"  of which ungrounded (not in context): {fab_ungrounded}/{fab_total}")
             print(f"control fields correct        : {control_ok}/{control_total}")
             print(f"AUROC(max_rr -> safe)         = {auroc(scores_all, labels):.3f}")
             if per_field_fab:
