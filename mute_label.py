@@ -76,9 +76,10 @@ def chunk_texts(root: str) -> list[tuple[str, str]]:
 
 
 def files_mentioning(term: str, chunks: list[tuple[str, str]]) -> list[str]:
-    t = term.lower()
-    hits = sorted({Path(u).name for u, c in chunks if t in (c or "").lower()})
-    return hits
+    """Files whose text contains `term` as a whole word (so 'samu' does not
+    match 'Samuele' or 'Samuli')."""
+    pat = re.compile(rf"\b{re.escape(term)}\b", re.I)
+    return sorted({Path(u).name for u, c in chunks if pat.search(c or "")})
 
 
 def label_question(q: str, files: list[Path], chunks: list[tuple[str, str]]) -> dict:

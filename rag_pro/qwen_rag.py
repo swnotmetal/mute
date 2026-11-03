@@ -56,6 +56,19 @@ def _cache_path(root: str) -> str:
     return os.path.join(os.path.dirname(__file__), f".parse_cache_{h}.pkl")
 
 
+def _pypdf_text(path: str) -> str:
+    """Plain text from a PDF via the installed pypdf (text layer only).
+
+    shortcut: no OCR; a scanned PDF still yields nothing, see parse_all.
+    """
+    try:
+        from pypdf import PdfReader
+
+        return "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
+    except Exception:
+        return ""
+
+
 def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[dict]:
     if os.path.exists(cache_path) and not refresh:
         with open(cache_path, "rb") as f:
@@ -69,6 +82,17 @@ def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[
         except Exception as e:
             print(f"[skip] {Path(f).name}: {type(e).__name__}: {e}")
             continue
+        # Scanned PDFs parse to near-empty chunks. Retry with pypdf's text layer;
+        # if that is empty too, drop the document so it cannot occupy a context
+        # slot as a silent blank chunk.
+        # shortcut: no OCR - upgrade to an OCR parser if these files matter.
+        if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]):
+            txt = _pypdf_text(f) if f.lower().endswith(".pdf") else ""
+            if len(txt.strip()) >= 50:
+                rec["raw"] = [{"content": txt, "metadata": {"chunk_id": "pypdf-0"}}]
+            else:
+                print(f"[skip] {Path(f).name}: no extractable text (scanned?)")
+                continue
         name = Path(f).name
         # Filename is part of the searchable text (the topic word often lives only in the
         # filename). Split on _ - . so Qwen-Agent's tokenizer sees "phishing" as its own
