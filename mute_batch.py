@@ -22,7 +22,7 @@ import os
 import time
 
 from llm_client import generate
-from mute_structured import build_context
+from mute_structured import build_context, final_answer
 from rag_pro.eval_rag import REFUSAL_MARKERS
 from rag_pro.qwen_rag import PROMPTS, _cache_path, collect_files, parse_all, retrieve_context
 from rag_pro.rerank import Reranker
@@ -98,8 +98,8 @@ def main() -> None:
             refused = any(m in grounded.lower() for m in REFUSAL_MARKERS)
 
             se = generate(SELFEVAL.format(ctx=ctx, q=q),
-                          backend=args.backend, model=args.model, max_tokens=8)
-            self_no = se.strip().upper().startswith("NO")
+                          backend=args.backend, model=args.model, max_tokens=300)
+            self_no = final_answer(se).strip().upper().startswith("NO")
 
             rec = {"question": q, "max_rr": max_rr, "n_kept": len(kept),
                    "top_files": [os.path.basename(u) for u, _ in kept[:3]],

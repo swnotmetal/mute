@@ -24,6 +24,7 @@ from mute_structured import (
     FIELDS,
     build_context,
     build_prompt,
+    final_answer,
     is_nullish,
     parse_json_obj,
     value_in_context,
@@ -60,10 +61,8 @@ def main() -> None:
     records = parse_all(collect_files(args.dir), _cache_path(args.dir))
     reranker = Reranker()
 
-    rows = []
+    rows = []  # key, expected, value, fabricated, correct, max_rr, self_no, ungrounded
     for key, question, expected in FIELDS:
-        if expected is not None:
-            continue  # abstention comparison only makes sense for absent fields
         _q, kept, scores, _n = retrieve_context(
             records, question, retrieve_k=args.retrieve_k, top_k=args.top_k, reranker=reranker)
         ctx = build_context(kept)
@@ -74,40 +73,49 @@ def main() -> None:
                        temperature=args.temperature, max_tokens=120)
         obj = parse_json_obj(out)
         value = None if obj is None else obj.get(key)
-        fabricated = not is_nullish(value)
+
+        if expected is None:
+            fabricated = not is_nullish(value)
+            correct = not fabricated
+        else:
+            fabricated = False
+            correct = (not is_nullish(value)) and expected in str(value).lower()
 
         se = generate(SELFEVAL.format(ctx=ctx, q=question),
                       backend=args.backend, model=args.model,
-                      temperature=0.0, max_tokens=8)
-        self_no = se.strip().upper().startswith("NO")
-
+                      temperature=0.0, max_tokens=300)
+        self_no = final_answer(se).strip().upper().startswith("NO")
         ungrounded = (not is_nullish(value)) and (not value_in_context(value, ctx))
-        rows.append((key, value, fabricated, max_rr, self_no, ungrounded))
+        rows.append((key, expected, value, fabricated, correct, max_rr, self_no, ungrounded))
 
-    print(f"{'field':<18}{'value':>22}{'fabricated':>11}{'max_rr':>9}{'self=NO':>9}{'unground':>10}")
-    print("-" * 79)
-    for key, value, fab, mr, se_no, ung in rows:
-        print(f"{key:<18}{str(value)[:20]:>22}{str(fab):>11}{mr:>9.4f}{str(se_no):>9}{str(ung):>10}")
+    print(f"{'field':<16}{'truth':>8}{'value':>16}{'fab':>6}{'ok':>6}{'max_rr':>8}{'selfNO':>7}{'ungrnd':>7}")
+    print("-" * 74)
+    for key, expected, value, fab, cor, mr, se_no, ung in rows:
+        truth = "ABSENT" if expected is None else expected
+        print(f"{key:<16}{truth:>8}{str(value)[:14]:>16}{str(fab):>6}{str(cor):>6}"
+              f"{mr:>8.4f}{str(se_no):>7}{str(ung):>7}")
 
-    labels = [r[2] for r in rows]
-    n_fab = sum(labels)
-    print(f"\nfabricated={n_fab}/{len(rows)}")
+    absent = [r for r in rows if r[1] is None]
+    controls = [r for r in rows if r[1] is not None]
+    fab_total = sum(1 for r in absent if r[3])
+    print(f"\nfabricated on absent fields : {fab_total}/{len(absent)}")
+    print(f"controls correct            : {sum(1 for r in controls if r[4])}/{len(controls)}")
 
-    # each signal scored so that HIGHER = more likely fabricated
-    sig_retrieval = [r[3] for r in rows]          # tested in both directions below
-    sig_selfeval = [1.0 if r[4] else 0.0 for r in rows]
-    sig_span = [1.0 if r[5] else 0.0 for r in rows]
+    print("\nAs ABSTENTION POLICIES:")
+    se_fire = [r for r in rows if r[6]]
+    print(f"  B. self-eval NO fires {len(se_fire)}/{len(rows)} | prevents "
+          f"{sum(1 for r in se_fire if r[3])}/{fab_total} fabrications | "
+          f"false-abstain {sum(1 for r in se_fire if r[1] is not None)}/{len(controls)}")
+    sp_fire = [r for r in rows if r[7]]
+    print(f"  C. span ungrounded fires {len(sp_fire)}/{len(rows)} | catches "
+          f"{sum(1 for r in sp_fire if r[3])}/{fab_total} fabrications | "
+          f"false-abstain {sum(1 for r in sp_fire if r[1] is not None)}/{len(controls)}")
+    print(f"  A. retrieval: max_rr(fabricated) = {[round(r[5], 4) for r in absent if r[3]]}")
+    print(f"                max_rr(abstained)  = {[round(r[5], 4) for r in absent if not r[3]]}")
+    print("  D. MUTE hidden-state probe = NOT wired (needs the CUAD probe model)")
 
-    print("\nAUROC for predicting FABRICATION (higher=better):")
-    print(f"  A. retrieval  max_rr          = {auroc(sig_retrieval, labels):.3f}")
-    print(f"  A'. retrieval  -max_rr        = {auroc([-s for s in sig_retrieval], labels):.3f}")
-    print(f"  B. LLM self-eval says NO      = {auroc(sig_selfeval, labels):.3f}")
-    print(f"  C. span attribution ungrounded= {auroc(sig_span, labels):.3f}")
-    print("  D. MUTE hidden-state probe    = n/a (not wired yet)")
-
-    print("\nNOTE: pilot with few absent fields; AUROC on tiny N is unstable. "
-          "Values flagged 'unground=False' but fabricated=True mean the fake value "
-          "happened to appear in context (label audit needed).")
+    print("\nNOTE: pilot. 'ungrnd=False' on a fabricated value = the fake value happens to "
+          "appear in context (answer substitution / label audit needed).")
 
 
 if __name__ == "__main__":

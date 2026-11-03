@@ -71,8 +71,13 @@ def value_in_context(value, ctx: str) -> bool:
     return v in c
 
 
+def final_answer(text: str) -> str:
+    """Text after a reasoning model's closing </think> tag (unchanged if absent)."""
+    return text.split("</think>")[-1]
+
+
 def parse_json_obj(text: str) -> dict | None:
-    text = text.split("</think>")[-1]  # reasoning models: keep only the final answer
+    text = final_answer(text)  # reasoning models: keep only the final answer
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         return None
