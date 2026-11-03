@@ -245,14 +245,22 @@ def retrieve_hybrid(records: list[dict], dense_query: str, bm25_query: str,
 
 
 def retrieve_context(records: list[dict], question: str, retrieve_k: int = 12,
-                     top_k: int = 5, reranker: "Reranker | None" = None):
+                     top_k: int = 5, reranker: "Reranker | None" = None,
+                     use_keywords: bool = True):
     """keyword-gen -> hybrid (BM25+dense RRF) -> optional rerank -> gated top-k.
 
     Returns (query, kept, scores, n_cands). Single source of truth for retrieval
     so `answer_question` and the probes stay in sync.
+
+    `use_keywords=False` skips the LLM keyword generator and uses the raw
+    question for BM25; that removes the dependence on an Ollama LLM, leaving
+    Ollama needed only for bge-m3 embeddings.
     """
-    keygen = SplitQueryThenGenKeyword(llm=LLM_CFG)
-    query = keywords_for(question, keygen)
+    if use_keywords:
+        keygen = SplitQueryThenGenKeyword(llm=LLM_CFG)
+        query = keywords_for(question, keygen)
+    else:
+        query = question
     cands = retrieve_hybrid(records, dense_query=question, bm25_query=query, k=retrieve_k)
     if not cands:
         return query, [], [], 0

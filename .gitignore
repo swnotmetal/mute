@@ -21,5 +21,10 @@ escalations.jsonl
 **/.parse_cache_*.pkl
 # RAG embedding cache (large binary, regenerated on demand)
 **/.embed_cache_*.pkl
+# Probe outputs and private question sets (contain real names)
+_cmp*.txt
+*.jsonl
+probe_runs/
+rag_pro/test_questions.txt
 workspace/
 AGENT.md
