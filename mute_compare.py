@@ -56,15 +56,27 @@ def main() -> None:
     ap.add_argument("--retrieve-k", type=int, default=20)
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--grounding", default="span", choices=["span", "hhem"],
+                    help="span = substring check; hhem = Vectara HHEM-2.1-Open")
+    ap.add_argument("--limit", type=int, default=0, help="only the first N fields")
     args = ap.parse_args()
+
+    fields = FIELDS[:args.limit] if args.limit else FIELDS
+    supporter = None
+    if args.grounding == "hhem":
+        from grounding import Supporter
+
+        supporter = Supporter()
+    print(f"grounding signal: {args.grounding}", flush=True)
 
     records = parse_all(collect_files(args.dir), _cache_path(args.dir))
     reranker = Reranker()
 
     rows = []  # key, expected, value, fabricated, correct, max_rr, self_no, ungrounded
-    for key, question, expected in FIELDS:
+    for key, question, expected in fields:
         _q, kept, scores, _n = retrieve_context(
-            records, question, retrieve_k=args.retrieve_k, top_k=args.top_k, reranker=reranker)
+            records, question, retrieve_k=args.retrieve_k, top_k=args.top_k,
+            reranker=reranker, use_keywords=False)
         ctx = build_context(kept)
         max_rr = max(scores) if scores else 0.0
 
@@ -85,7 +97,12 @@ def main() -> None:
                       backend=args.backend, model=args.model,
                       temperature=0.0, max_tokens=300)
         self_no = final_answer(se).strip().upper().startswith("NO")
-        ungrounded = (not is_nullish(value)) and (not value_in_context(value, ctx))
+        if is_nullish(value):
+            ungrounded = False
+        elif supporter is not None:
+            ungrounded = supporter.score(ctx, [f"{question} Answer: {value}"])[0] < 0.5
+        else:
+            ungrounded = not value_in_context(value, ctx)
         rows.append((key, expected, value, fabricated, correct, max_rr, self_no, ungrounded))
 
     print(f"{'field':<16}{'truth':>8}{'value':>16}{'fab':>6}{'ok':>6}{'max_rr':>8}{'selfNO':>7}{'ungrnd':>7}")
