@@ -1,198 +1,112 @@
-# RAG 架构复盘（`rag_pro/`）
+# RAG prototype
 
-> 目的：把这个 RAG 的**每个零件在干什么**讲清楚，方便你学习，也方便后面接"幻觉探针"实验。
-> 这里刻意用**成熟库（Qwen-Agent）打底**，而不是从零手写 —— 手写版留在 `rag/` 当对照/消融基线。
+A small local question-answering system. It reads a folder of documents, finds
+the parts that look relevant to a question, and asks a local language model to
+answer from those parts only.
 
----
+The folder is a parameter, so nothing here depends on one particular document
+set. No document names, people, organisations or dates are used in this file.
 
-## 1. 一句话总览
-
-> **解析一次 → 切块 → 每条问题：生成关键词 + 稠密向量 → 混合检索（BM25 + bge-m3，RRF 融合）→ 拼上下文 → 7B 生成（带"查不到就拒绝"约束）。**
-
-```mermaid
-flowchart LR
-    A[Laurea 目录<br/>pdf/docx/pptx/xlsx/csv...] -->|DocParser 解析一次<br/>结果 pickle 缓存| B[chunks 块<br/>527 块 / 120 文件]
-    Q[用户问题] --> K[SplitQueryThenGenKeyword<br/>LLM 拆解+多语言关键词]
-    K --> S1[BM25 稀疏检索]
-    Q --> E[bge-m3 稠密向量]
-    B --> E
-    E --> S2[稠密相似度排序]
-    S1 --> RRF[RRF 融合]
-    S2 --> RRF
-    RRF -->|top-k| C[上下文拼接]
-    C --> G[qwen2.5:7b<br/>仅依据上下文作答]
-    G --> ANS[答案 / 拒绝]
-```
-
----
-
-## 2. 每个工具/模块的作用
-
-### 2.1 解析层 —— `qwen_rag.py::parse_all()`
-| 工具 | 作用 | 为什么用它 |
-|---|---|---|
-| **Qwen-Agent `DocParser`** | 把 pdf/docx/pptx/xlsx/csv/html 统一解析成**带页码/块 id 的 chunks** | 手写 `python-docx` 会漏掉 **docx 表格**（你的 Corpus 大量是表格，比如钓鱼邮件练习文件全是表格）。DocParser 原生处理表格，这是"别重造轮子"的直接收益。 |
-| **pickle 缓存** | 解析结果存 `.parse_cache_*.pkl` | 解析 181 个文件很慢，重复问答不该重解析。 |
-| **文件名注入** | 每块前面加 `[file: ...]`，并把 `_ - .` 换成空格 | 很多文档的"主题词"只存在于**文件名**里（如 `Wu_Shuang_Phishing-Email-Practise.docx`），正文没写"phishing"。同时防止 `phishing` 和整串文件名被当成一个 token。 |
-
-### 2.2 查询层 —— `qwen_rag.py::keywords_for()`
-| 工具 | 作用 | 为什么用它 |
-|---|---|---|
-| **Qwen-Agent `SplitQueryThenGenKeyword`** | 用 LLM 把问题拆成子查询，并生成**中英双语关键词** | 应对多词/专有名词问题；也让 BM25 在中文提问时能命中英文/芬兰语正文。 |
-| （备选）直接拿原问题 | —— | 关键词生成偶尔会加进 `student / learn` 这种"泛词"，反而拉高长文档的 BM25 分数（噪声来源之一，见 §4）。 |
-
-### 2.3 检索层 —— `qwen_rag.py::retrieve_hybrid()`
-这是**核心**，两条腿走路：
-
-| 组件 | 类型 | 作用 | 弱点 |
-|---|---|---|---|
-| **`KeywordSearch`（rank_bm25）** | 稀疏检索 | 精确词面命中，专有名词/文件名很准 | 遇到 `student/learn` 这种**泛词**，会把长文档（Guidelines、study plan）顶上来 → 噪声 |
-| **`embed.embed()`（Ollama `bge-m3`）** | 稠密检索 | **多语言**语义匹配（芬兰语/英文/中文互通），能跨越词面不一致 | 分数被压得很扁（0.4–0.7 都挤在一起），绝对阈值不好设；对"表格/练习稿"这类语义弱文档不敏感 |
-| **RRF（Reciprocal Rank Fusion）** | 融合 | 只按**排名**融合两路结果，无需归一化分数：`score = Σ 1/(60+rank)` | —— |
-
-> 为什么必须混合？你的语料是**芬兰/英语混合**（Laurea），问题常是英文。纯 BM25 在跨语言时失效（芬兰语正文 vs 英文问题）；纯稠密在专有名词/文件名上不够锐利。RRF 让两者互补。
-
-### 2.4 重排层 —— `rerank.py::Reranker`（**当前默认关闭**）
-| 组件 | 作用 | 现状 |
-|---|---|---|
-| **`bge-reranker-base`**（cross-encoder） | 对候选块做 query-passage 精排 | **英文专用模型**，在你的芬兰语语料 + 中文查询上严重失配（相关文档打分 ~0.0003，无关文档反而 0.43）。所以默认关闭，仅用 `--rerank` 可开。**正确解法是换多语言 reranker（`bge-reranker-v2-m3`），见 §6。** |
-
-### 2.5 生成层 —— `qwen_rag.py::ollama_answer()`
-| 组件 | 作用 |
-|---|---|
-| **Ollama `qwen2.5:7b`** + `temperature=0` | 仅依据拼好的上下文作答；查不到时要求**原样输出「资料中没有相关信息」**（这就是最朴素的"拒答"，也是接探针的挂钩点）。 |
-| 为什么 7B 而不是 0.8B | 抽取质量：小模型会把上下文里没有的东西编出来；7B 至少会拒绝（虽然也常过度拒绝，见 §4）。 |
-
-### 2.6 评测层 —— `eval_rag.py`
-| 组件 | 作用 |
-|---|---|
-| 8 条人工题 + 可接受子串（中英双语备选） | 量化"及格线"，避免自我感觉良好。 |
-| **诚实判定** | 答案含 `no mention / was not discussed / does not contain ...` 等**否定/搪塞措辞**也算 FAIL —— 否则 7B 的"查无此信息"会被子串误判成 PASS（这是之前 88% 虚高的原因）。 |
-| `PASS_BAR = 0.75` | 达到才提示"可以开始写探针"。 |
-
----
-
-## 3. 一次问答具体发生了什么
-
-1. `parse_all()` 读缓存（或首次解析 120 文件 → 527 个块）。
-2. `keywords_for()` 让 7B 生成关键词 → `student, learn, phishing, 学生, 学习, 钓鱼`。
-3. `retrieve_hybrid()`：
-   - BM25 用关键词在全部块上打分排序；
-   - bge-m3 把**原问题**转向量，和 527 个块向量算余弦排序；
-   - RRF 合并两路 → top-12 候选 → 取 top-k（默认 6）。
-4. `ollama_answer()` 把 top-k 块拼成上下文，7B 作答（或拒绝）。
-5. `eval_rag.py` 判定 PASS/FAIL。
-
----
-
-## 4. 当前真实状态（诚实版）
-
-**没到及格线。** 而且之前的 88%/62% 都偏乐观（模型大量在答 "does not mention / was not discussed"，被子串误判）。
-
-按严格判定，真实通过率约 **2–5 / 8**。三个失败模式已定位：
-
-1. **泛词噪声**：`student / learn` 这类词让 `Guidelines_for_referencing.pdf`、`study plan.docx` 靠 BM25 挤进 top-k，7B 被带跑偏（问 phishing 却答成 Ionic 项目）。
-2. **多页文档的答案块没进 top-k**：合同签名在**最后一页**，但检索只回溯到该文档第一块（标题页）。问"谁签的字"，答案块根本没被捞到。
-3. **英文 reranker / 语义弱文档**：`bge-reranker-base` 对芬兰语失配；`Phishing-Email-Practise.docx` 是"邮件练习表格"，语义上与"学了什么"不接近，稠密只排第 4（靠 BM25 才夺冠）。
-
-> 这说明：**不是解析坏了，是"检索精度 + 上下文信噪比"没到线**。这正是后面探针要检测的东西 —— 但你说过要先到及格线再写探针，所以我们先补检索。
-
----
-
-## 5. 两条路线的定位
-
-| | `rag/`（手写） | `rag_pro/`（成熟库，主用） |
-|---|---|---|
-| 解析 | 自己写 docx/表格/csv 加载 | Qwen-Agent `DocParser` |
-| 检索 | bge-small-en 向量 + BM25 + RRF | bge-m3（多语言）+ BM25 + RRF |
-| 生成 | qwen2.5 | qwen2.5:7b |
-| 定位 | **消融基线 / 学习对照** | **主力** |
-
----
-
-## 6. 到及格线的下一步（按性价比排序）
-
-1. **换多语言 reranker：`BAAI/bge-reranker-v2-m3`**（配 `retrieve_k=20` 再精排到 top-5）。
-   —— 直接针对失败模式 3，也是"成熟方案"（BGE 官方多语言重排器）。约 2.2GB 下载。
-2. **候选池加大 + 页面级召回**：`retrieve_k` 提到 20，让"签名页"这类**后置块**有机会进候选，再由 reranker 挑。
-3. **泛词抑制**：关键词生成后过滤掉高频泛词（保留 IDF 高的词），减少失败模式 1。
-4. **评测题要"对得上语料"**：部分题（如"学了什么 phishing"）在语料里可能本就没有"学习心得"文本，属于**题目不可答**，应改成语料确实包含的事实题，指标才可信。
-
-> 这几步做完，再把 `eval_rag.py` 跑到 ≥75%，就是"可以开始写探针"的信号。
-
----
-
-## 7. 与"幻觉探针"的接口
-
-这个 RAG 天然给了探针三个可观测信号（后面写探针直接用）：
-- **检索置信度**：top-1 与 top-k 的分数/是否为空 → 检索是否失败；
-- **拒答标记**：生成是否命中「资料中没有相关信息」；
-- **答案-上下文一致性**：答案里的实体是否能在被检索块中找到（NLI / 子串 / 归一化匹配）。
-
-> 探针实验的科学目标：**在"检索会失败"的真实 RAG 上，衡量"探针能否提前发现失败"，而不是靠构造假数据。** 所以当前这些失败模式，恰恰是有价值的实验素材。
-
----
-
-## 8. 更新：两阶段检索已落地（实测）
-
-按 §6 方案 1+2 实现，现在是真正的两阶段：
+## The flow
 
 ```
-混合检索 K1=20（BM25 + bge-m3，RRF）
-        ↓
-bge-reranker-v2-m3 多语言精排（评分区分度好：正确块 0.98 / 噪声 0.002）
-        ↓
-相对门限 CRAG：保留 score ≥ max(0, 0.15 × 最高分)  ← 关键
-        ↓
-K2 ≤ 5 喂给 qwen2.5:7b
+documents -> parse -> chunks -> search (two ways) -> merge by rank
+          -> rerank -> keep the relevant ones -> answer -> check the answer
 ```
 
-**为什么用"相对门限"而不是固定阈值**：reranker 自信时噪声会被 0.15×best 砍掉；而当所有候选都"弱相关"（如 0.025/0.010/0.008）时，固定阈值会把它们全砍光导致误拒，相对门限则都能保留。这是 CRAG 的思路，且只有在**多语言 reranker 打分可靠**时才成立（英文版 reranker 打分不可靠，做不到）。
+## What each step does
 
-**实测（`eval_rag.py`，诚实判定）**：
+| Step | Plain description | Uses |
+| --- | --- | --- |
+| Parse | Turn PDF, DOCX, PPTX, XLSX, CSV and TXT into text with page and chunk ids. Done once, then cached. | Qwen-Agent `DocParser` |
+| Chunk | Split each document into small pieces (about one page each). | parser settings |
+| Search, keyword | Classic word matching. Good with names and file names, weak with paraphrases. | BM25 (`rank_bm25`) |
+| Search, meaning | Turn text into vectors and compare meanings. Works across languages. | `bge-m3` via Ollama |
+| Merge | Combine the two rankings by position, not by raw score, so the two scales never have to match. | RRF |
+| Rerank | Score each candidate against the question directly and keep the best. | `bge-reranker-v2-m3` |
+| Keep | Drop candidates that score far below the best one. | relative cut |
+| Answer | The model sees only the kept text and must stay inside it. | local model via Ollama or llama.cpp |
+| Check | Compare the answer with the retrieved text. | HHEM-2.1-Open or a simple check |
 
-| 配置 | 通过率 |
-|---|---|
-| 无 reranker（混合 top-5） | ~62%（虚高，含拒答误判）→ 诚实约 1/8 |
-| **英文 reranker（bge-reranker-base）** | 1/8 —— 芬兰语失配，把正确块排后 |
-| **多语言 reranker + 相对门限（当前）** | **5/8 = 62%** |
+## The settings that matter
 
-修好的：car rental、who signed contract、GDPR、Linux、student name。
-仍未过的 3 题，根因**不是**随便调 K 能解的：
+| Setting | Default | What it controls |
+| --- | --- | --- |
+| `--retrieve-k` | 20 | how many candidates are pulled before reranking |
+| `max_per_doc` | 2 | how many chunks one document may contribute |
+| `expand_docs` / `expand_per_doc` | 3 / 3 | how many extra chunks are pulled from the strongest documents |
+| rerank ratio | 0.15 | keep chunks scoring at least 15% of the best score |
+| `--top-k` | 5 | how many chunks the model actually reads |
 
-- `Samu`：答案（"Created by Shuang and Samu"）藏在 car rental 文档深处，问句与它的语义/词面都不强相关，没进 top-k。
-- `phishing` / `POWER-BI`：语料里是**练习稿 / CV 里的"感兴趣"**，不是"我学到了什么"的总结。reranker 正确地判定"这块不回答这个问题"，于是 7B 拒绝。**属于题目与语料语义不匹配（§6 第 4 点）**，不是管线 bug。
+## Design choices, and why
 
-> 结论：管线（两阶段 + 门限）现在是**正确且可解释**的；剩下 3 题的提升要靠"文档级块扩展 / 更好的分块"或"改造为语料确实包含的事实题"，而不是继续拧 K。
+- **Two search methods, not one.** Word matching fails when the question uses
+  different words from the document; meaning search fails on exact names. They
+  fail in different places, so they are combined.
+- **Merge by rank, not by score.** Keyword scores and vector scores live on
+  different scales. Comparing their order avoids normalising them.
+- **Two stages.** First stage casts a wide net. Second stage scores each
+  candidate against the question and throws most of them away. A single stage
+  cannot be both wide and precise.
+- **Relative cut, not a fixed one.** A fixed cut either removes weak but useful
+  text, or keeps strong but useless text. Cutting relative to the best score
+  adapts to each question.
+- **One document cannot take over.** Without a cap, one long file fills the
+  whole candidate list and other files never get a chance.
+- **Add neighbouring text when a document is clearly relevant.** Search often
+  returns only a front page or a table of contents. Pulling more of that same
+  document is what puts the actual answer in front of the model.
+- **Multilingual models where the corpus is mixed.** A model that only knows
+  one language silently scores correct text as irrelevant.
 
-### 8.1 逐项验证（用代码测，不靠猜）
+## Problems found during development (each is a general lesson)
 
-- **去重 / RRF 对齐**：`retrieve_hybrid` 以 `(url, chunk_id)` 为 key 融合 → 三题均 `n=20 unique=20`，**无重复**。（RRF 只看排名，不存在分值未归一化问题。）
-- **同文档占位**：`BOP_python.pdf` 曾一次占据 5/20、`s10994...pdf` 占 4/20 → 已加 **`max_per_doc=2`** 按文档限流，防单个大文件垄断候选池。
-- **CPU 批处理 padding 失真**：batch(8) 与单条打分 `max|diff|=0.000000` → **无失真**（该假设排除）。
-- **语料可答性**（全量 chunk 实测）：`phishing` 全文仅 1 处、且是**邮件表头表格**；`power bi` 有 5 处（**项目报告**类）；`samu` 有 3 处（其中 `Simple car rental` 含 "Created by Shuang and Samu" = 正解）。
+1. **Tables inside office documents disappear** if you read only paragraphs.
+   Use a parser that reads table cells.
+2. **Some PDFs have no text layer** (scans). They parse into empty chunks and
+   then waste a slot in the context. Retry with a second PDF reader; if it is
+   still empty, skip the file and print a warning. Never keep silent blank
+   chunks.
+3. **A file's first chunk is often a cover page.** If search only ever returns
+   first chunks, the answer text never arrives. Expand within the document.
+4. **One large file can occupy most of the candidate list.** Cap it per
+   document.
+5. **A small reranker can be too strict.** Used with a hard cut-off it removes
+   correct text. Use it to rank, and cut relative to the best score.
+6. **Keyword matching needs word boundaries.** A short term must not match
+   inside a longer word.
+7. **A model that never refuses will invent values.** With no option to say
+   "not in the documents", it fills missing fields with plausible numbers.
+   That behaviour belongs to the model, not to the retriever.
 
-### 8.2 三题失败的**三种不同成因**（不是同一个 bug）
+## Evaluation
 
-| 题 | 成因 | 性质 |
-|---|---|---|
-| phishing | 语料只有"钓鱼邮件练习表头"，**没有"学到什么"的文本** | **题目不可答**（应换题） |
-| POWER-BI | 正确文档（dddm 项目报告）已排第 1 并进入上下文，但 7B **过度拒绝**（上下文无"我学到…"句式） | 生成层过度保守（可调 prompt） |
-| Samu | 正解在 `Simple car rental`（"Created by Shuang and Samu"），但检索把同样含 Samu 的 `Group 4_Methods` 排前 | 排序问题（较难） |
+A fixed list of questions with expected key terms. A question passes when the
+answer is not a refusal and contains at least one expected term. The pass bar
+is 75%.
 
-> 结论：**去重 / RRF / padding 均无问题**（排除常见误判）；真正的瓶颈是"**语料 vs 题目语义不匹配**"与"**7B 过度拒绝**"。62% 是一个**诚实、可解释**的基线，而非管线 bug。
+Current state: 6 of 8 questions pass on a small hand-built set. The two
+failures are understood: one asks for information the documents do not contain,
+and one needs a fact that sits deep inside a document that search never reached.
 
-### 8.3 最终修复：文档级块扩展 → **6/8 = 75%（达到及格线）**
+A refusal is not the same as a good answer. Counting refusals as passes is the
+easiest way to fool yourself.
 
-`retrieve_hybrid` 新增 `expand_docs=3 / expand_per_doc=3`：对 RRF 排名靠前的文档，额外补入**该文档内与问题语义最相似的正文块**。这解决了"只检索到封面/目录页"的核心问题——POWER-BI 的正文块、合同的签名页都因此进入候选。同时把 grounding prompt 放宽为"上下文描述了相关主题即据此作答，仅完全无关才拒绝"。
+## Running it
 
-**最终实测（诚实判定，答案逐条核对为真）：6/8 = 75% ✅**
+```bash
+python -m rag_pro.qwen_rag --dir "PATH/TO/DOCUMENTS" --question "Your question"
+python -m rag_pro.eval_rag --dir "PATH/TO/DOCUMENTS"
+```
 
-| 题 | 结果 |
-|---|---|
-| car rental / contract（Sini Ågrén & Shuang Wu）/ POWER-BI（MarkIt dashboard）/ GDPR / Linux / student name | ✅ 通过 |
-| phishing | ❌ **语料不可答**（全文仅一张钓鱼邮件表头，无"学到什么"） |
-| Samu | ❌ 正解在 `Simple car rental`（"Created by Shuang and Samu"），但该文档未进该问题的 top 文档 → **冷僻实体召回缺失** |
+Optional: `--no-rerank` to skip the second stage, `--top-k` and
+`--retrieve-k` to change how much text is used.
 
-> 剩下两题都不是管线 bug：一个是**题目本身不可答**，一个是**冷僻实体召回**。管线（RRF 去重 → 文档限流 → 文档扩展 → 多语言精排 → 相对门限 → 生成）已正确，可以进入 **Mute 探针**阶段；这两类失败恰是探针要检测的真实样本。
+## Limits
 
+- Quality is capped by the text layer of the source files.
+- Counting and cross-file aggregation questions are better answered from a
+  metadata table than from a retriever. Vector search does not count.
+- Images, diagrams, spreadsheets of pictures and video cannot be read at all.
+- The generator can still add unsupported detail. Check the answer against the
+  retrieved text before trusting it.
