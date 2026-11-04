@@ -32,6 +32,7 @@ from qwen_agent.agents.keygen_strategies.split_query_then_gen_keyword import (
 from qwen_agent.llm.schema import Message
 from qwen_agent.tools.doc_parser import DocParser, Record
 from qwen_agent.tools.search_tools.keyword_search import KeywordSearch
+from qwen_agent.utils.tokenization_qwen import count_tokens
 
 from .embed import EMBED_MODEL, cosine, embed
 from .rerank import Reranker
@@ -69,6 +70,26 @@ def _pypdf_text(path: str) -> str:
         return ""
 
 
+_DOCLING = None
+
+
+def _docling_text(path: str) -> str:
+    """Markdown via Docling: layout, tables and OCR. Slow on CPU.
+
+    shortcut: one shared converter, CPU layout model, seconds per page. Use only
+    as a fallback; upgrade to a GPU/batch pipeline if it becomes the main parser.
+    """
+    global _DOCLING
+    try:
+        from docling.document_converter import DocumentConverter
+
+        if _DOCLING is None:
+            _DOCLING = DocumentConverter()
+        return _DOCLING.convert(path).document.export_to_markdown()
+    except Exception:
+        return ""
+
+
 def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[dict]:
     if os.path.exists(cache_path) and not refresh:
         with open(cache_path, "rb") as f:
@@ -88,10 +109,13 @@ def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[
         # shortcut: no OCR - upgrade to an OCR parser if these files matter.
         if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]):
             txt = _pypdf_text(f) if f.lower().endswith(".pdf") else ""
+            if len(txt.strip()) < 50:
+                txt = _docling_text(f)  # layout + tables + OCR; slow, last resort
             if len(txt.strip()) >= 50:
-                rec["raw"] = [{"content": txt, "metadata": {"chunk_id": "pypdf-0"}}]
+                rec["raw"] = [{"content": txt, "metadata": {"chunk_id": "fallback-0"},
+                               "token": count_tokens(txt)}]
             else:
-                print(f"[skip] {Path(f).name}: no extractable text (scanned?)")
+                print(f"[skip] {Path(f).name}: no extractable text (image only?)")
                 continue
         name = Path(f).name
         # Filename is part of the searchable text (the topic word often lives only in the
