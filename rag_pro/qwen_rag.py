@@ -90,6 +90,18 @@ def _docling_text(path: str) -> str:
         return ""
 
 
+def _looks_flattened(rec: dict) -> bool:
+    """True when the extracted text collapsed into very few long lines.
+
+    A table read column-by-column loses the row structure: every value lands on
+    one giant line, so nothing can be tied to its row. That is not "empty", but
+    it is just as unusable, so it triggers the layout-aware parser.
+    """
+    text = "".join(pg.get("content") or "" for pg in rec["raw"])
+    longest = max((len(line) for line in text.splitlines()), default=0)
+    return longest > 1000
+
+
 def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[dict]:
     if os.path.exists(cache_path) and not refresh:
         with open(cache_path, "rb") as f:
@@ -107,10 +119,12 @@ def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[
         # if that is empty too, drop the document so it cannot occupy a context
         # slot as a silent blank chunk.
         # shortcut: no OCR - upgrade to an OCR parser if these files matter.
-        if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]):
+        if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]) or _looks_flattened(rec):
             txt = _pypdf_text(f) if f.lower().endswith(".pdf") else ""
-            if len(txt.strip()) < 50:
+            if len(txt.strip()) < 50 or _looks_flattened({"raw": [{"content": txt}]}):
                 txt = _docling_text(f)  # layout + tables + OCR; slow, last resort
+                if txt:
+                    print(f"[layout] {Path(f).name}: re-parsed with Docling")
             if len(txt.strip()) >= 50:
                 # KeywordSearch reads metadata['source'] and ['chunk_id'].
                 rec["raw"] = [{"content": txt,
@@ -322,6 +336,31 @@ def retrieve_context(records: list[dict], question: str, retrieve_k: int = 12,
                                      top_k=top_k, threshold=0.0)
         kept = [c for c, _ in pairs]
         scores = [s for _, s in pairs]
+
+    # A quoted span in the question is a literal requirement ("elements of AI").
+    # Cross-encoders score long table pages low even when they contain it, so pin
+    # up to two chunks that literally hold the phrase.
+    quoted = re.findall(r'["\u201c]([^"\u201d]{2,60})["\u201d]', question)
+    if quoted:
+        have = {t for _, t in kept}
+        added = 0
+        for u, t, _s in cands:
+            if added >= 2:
+                break
+            low = (t or "").lower()
+            idx = -1
+            for q in quoted:
+                found = low.find(q.lower())
+                if found >= 0 and (idx < 0 or found < idx):
+                    idx = found
+            if idx < 0 or t in have:
+                continue
+            # Keep the window around the hit: long tables push the phrase past any
+            # fixed prefix, and the generator only sees a few hundred characters.
+            kept.append((u, t[max(0, idx - 500): idx + 900]))
+            scores.append(0.0)
+            have.add(t)
+            added += 1
     return query, kept, scores, len(cands)
 
 
