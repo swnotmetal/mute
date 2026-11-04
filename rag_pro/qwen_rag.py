@@ -112,7 +112,9 @@ def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[
             if len(txt.strip()) < 50:
                 txt = _docling_text(f)  # layout + tables + OCR; slow, last resort
             if len(txt.strip()) >= 50:
-                rec["raw"] = [{"content": txt, "metadata": {"chunk_id": "fallback-0"},
+                # KeywordSearch reads metadata['source'] and ['chunk_id'].
+                rec["raw"] = [{"content": txt,
+                               "metadata": {"source": f, "chunk_id": "fallback-0"},
                                "token": count_tokens(txt)}]
             else:
                 print(f"[skip] {Path(f).name}: no extractable text (image only?)")
