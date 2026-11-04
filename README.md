@@ -150,6 +150,76 @@ Potential advantages worth investigating:
 
 These are potential engineering advantages, not yet demonstrated end-to-end performance guarantees.
 
+## The RAG experiment (this branch)
+
+The CUAD result answers "can the model tell that a fact is missing?". It does not
+answer the question a deployed system actually faces: **the context is supplied by
+a retriever, so is the failure "the model does not know" or "the retriever did not
+bring the answer"?**
+
+This branch builds a small, fully local RAG over a personal document collection to
+study that. It is a testbed, not a product.
+
+### Pipeline
+
+| Step | Choice |
+| --- | --- |
+| Parse | structured document parser, then a plain PDF reader, then a layout/OCR parser as a last resort |
+| Chunk | about one page per chunk |
+| Retrieve | keyword search and meaning search, merged by rank |
+| Rerank | a cross-encoder, then keep what scores close to the best hit |
+| Generate | a local instruction model, told to stay inside the retrieved text |
+| Check | a small entailment model, or a simple term check |
+
+### What it measures
+
+**Answer quality** on 20 hand-labelled questions (18 usable; two were ambiguous
+and excluded). Grading rules are hand-written and printed for audit.
+
+| Question type | Pass | Total | Rate |
+| --- | ---: | ---: | ---: |
+| fact lookup | 7 | 10 | 70% |
+| list | 1 | 3 | 33% |
+| negative (answer is "not stated") | 1 | 3 | 33% |
+| counting | 0 | 2 | 0% |
+| **all** | **9** | **18** | **50%** |
+
+Two of the three refusals were wrong: the information was in the collection.
+
+**Fabrication under pressure.** With a prompt that forbids saying "not stated",
+the model filled 18 of 46 absent fields (39%). Most were plainly unsupported; three
+were *substitutions* — a real value lifted from the wrong place (a number from a
+code sample, a total used as an hourly rate).
+
+**Do cheap signals replace a probe?** On the same items:
+
+| Signal | Recall on fabrications | False alarms |
+| --- | ---: | ---: |
+| Retrieval score | no separation at all | — |
+| Model self-assessment ("can this be answered?") | 22% | 0/3 |
+| Small entailment model | 83% | 0/3 |
+
+The remaining 17% is systematic, not random: whenever the invented value already
+exists somewhere in the collection, a text-level checker sees "support" and lets it
+pass.
+
+### What this says about MUTE
+
+The honest reading is narrow. A 0.1B entailment model already covers most of the
+ground, so a hidden-state probe only has room in the residual case where a value is
+real but attached to the wrong question. That is a genuine gap, but it is a small
+one, and it has not been tested here — the probe is not wired into this pipeline.
+
+### Running it
+
+```bash
+python -m rag_pro.qwen_rag --dir "PATH/TO/DOCUMENTS" --question "Your question"
+python qa_eval.py --run --dir "PATH/TO/DOCUMENTS"   # saves answers
+python qa_eval.py --report                          # grades them
+```
+
+Long runs write one JSON line per item and resume where they stopped.
+
 ## What This Project Does Not Claim
 
 This is an experimental missing-context detector, not a universal truth detector.
@@ -187,7 +257,10 @@ The next stage is to determine whether the observed signal generalizes beyond th
 3. **Better metrics:** Report precision, recall, false-positive rate, and threshold sensitivity, alongside accuracy.
 4. **Baseline comparisons:** Compare against simple text-based classifiers and relevant abstention or verification methods.
 5. **Actual early-exit inference:** Implement a forward pass that stops at the selected layer, then benchmark end-to-end latency, throughput, and memory.
-6. **Broader task evaluation:** Investigate whether the approach extends to RAG evidence sufficiency or other narrowly defined reliability tasks.
+6. **RAG evidence sufficiency:** started on this branch (see "The RAG experiment"
+   above). Cheap signals already cover most cases there, so the probe's room looks
+   narrow; the next step is to wire the probe against the residual substitution
+   cases.
 
 ## Final Thought
 
