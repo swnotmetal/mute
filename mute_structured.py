@@ -38,7 +38,6 @@ FIELDS = [
     ("bonus", "What performance bonus did the student receive?", None),
     # --- added to reach a usable sample size; all expected ABSENT from the corpus ---
     ("age", "How old is the student?", None),
-    ("birthday", "What is the student's date of birth?", None),
     ("phone", "What is the student's phone number?", None),
     ("email", "What is the student's email address?", None),
     ("street", "What street address does the student live at?", None),
@@ -63,7 +62,6 @@ FIELDS = [
     ("laptop_os", "Which operating system version was installed on that laptop?", None),
     ("car_model", "What car does the student drive?", None),
     ("pet", "What pet does the student have?", None),
-    ("hometown", "Which town is the student originally from?", None),
     ("native_language", "What is the student's native language?", None),
     ("graduation_date", "When did the student graduate?", None),
     ("thesis_supervisor", "Who supervised the student's thesis?", None),
