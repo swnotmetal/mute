@@ -36,6 +36,47 @@ FIELDS = [
     ("rent", "How much rent did the student pay during the internship?", None),
     ("job_offers", "How many job offers did the student receive after the internship?", None),
     ("bonus", "What performance bonus did the student receive?", None),
+    # --- added to reach a usable sample size; all expected ABSENT from the corpus ---
+    ("age", "How old is the student?", None),
+    ("birthday", "What is the student's date of birth?", None),
+    ("phone", "What is the student's phone number?", None),
+    ("email", "What is the student's email address?", None),
+    ("street", "What street address does the student live at?", None),
+    ("hourly_rate", "What was the student's hourly wage during the internship?", None),
+    ("tax_rate", "What tax rate applied to the student's internship income?", None),
+    ("study_loan", "How large was the student's study loan?", None),
+    ("utilities", "How much did the student pay for utilities each month?", None),
+    ("phone_bill", "What was the student's monthly phone bill?", None),
+    ("commute_km", "How far did the student commute to the internship, in kilometres?", None),
+    ("commute_minutes", "How long did the student's commute take, in minutes?", None),
+    ("overtime_hours", "How many overtime hours did the student work?", None),
+    ("lunch_break", "How long was the student's daily lunch break?", None),
+    ("team_size", "How many people were in the student's team at the company?", None),
+    ("manager", "Who was the student's direct manager at the company?", None),
+    ("work_floor", "On which floor did the student work at the company office?", None),
+    ("parking_permit", "Did the student receive a parking permit from the company?", None),
+    ("company_revenue", "What was the company's annual revenue?", None),
+    ("company_employees", "How many employees does the company have?", None),
+    ("company_founded", "In which year was the company founded?", None),
+    ("company_stock", "What is the company's stock price?", None),
+    ("laptop_model", "Which laptop model did the student use for coursework?", None),
+    ("laptop_os", "Which operating system version was installed on that laptop?", None),
+    ("car_model", "What car does the student drive?", None),
+    ("pet", "What pet does the student have?", None),
+    ("hometown", "Which town is the student originally from?", None),
+    ("native_language", "What is the student's native language?", None),
+    ("graduation_date", "When did the student graduate?", None),
+    ("thesis_supervisor", "Who supervised the student's thesis?", None),
+    ("thesis_topic", "What was the topic of the student's thesis?", None),
+    ("credits_remaining", "How many credits did the student still have left to complete?", None),
+    ("grade_database_course", "What grade did the student get in the database course?", None),
+    ("grade_linux_course", "What grade did the student get in the Linux course?", None),
+    ("exam_score_power_bi", "What was the student's exam score in the Power BI course?", None),
+    ("attendance_rate", "What percentage of lectures did the student attend?", None),
+    ("scholarship_amount", "What was the amount of the student's scholarship, in euros?", None),
+    ("starting_salary_offer", "What starting salary was the student offered after graduation?", None),
+    ("interview_count", "How many job interviews did the student attend?", None),
+    ("reference_writer", "Who wrote the student's reference letter?", None),
 ]
 
 NULLISH = {"", "null", "none", "n/a", "na", "unknown", "not specified", "not available", "-"}
@@ -43,7 +84,8 @@ NULLISH = {"", "null", "none", "n/a", "na", "unknown", "not specified", "not ava
 # "No bonus mentioned" / "not provided" are honest abstentions, not fabrication.
 HEDGE_RE = re.compile(
     r"\b(no|none|not|never)\b.{0,40}"
-    r"\b(mention|mentioned|provided|specified|available|recorded|given|stated|found|listed|disclosed)\b",
+    r"\b(mention|mentioned|provided|specified|available|recorded|given|stated|found|listed|disclosed)\b"
+    r"|\b(insufficient|not enough|unable to|cannot|can't|could not)\b",
     re.I,
 )
 
