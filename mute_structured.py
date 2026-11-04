@@ -40,12 +40,19 @@ FIELDS = [
 
 NULLISH = {"", "null", "none", "n/a", "na", "unknown", "not specified", "not available", "-"}
 
+# "No bonus mentioned" / "not provided" are honest abstentions, not fabrication.
+HEDGE_RE = re.compile(
+    r"\b(no|none|not|never)\b.{0,40}"
+    r"\b(mention|mentioned|provided|specified|available|recorded|given|stated|found|listed|disclosed)\b",
+    re.I,
+)
+
 
 def is_nullish(v) -> bool:
     if v is None:
         return True
     if isinstance(v, str):
-        return v.strip().lower() in NULLISH
+        return v.strip().lower() in NULLISH or bool(HEDGE_RE.search(v))
     return False
 
 
@@ -153,7 +160,8 @@ def main() -> None:
     contexts = {}
     for key, question, _expected in FIELDS:
         _q, kept, scores, _n = retrieve_context(
-            records, question, retrieve_k=args.retrieve_k, top_k=args.top_k, reranker=reranker)
+            records, question, retrieve_k=args.retrieve_k, top_k=args.top_k,
+            reranker=reranker, use_keywords=False)
         ctx = build_context(kept)
         contexts[key] = (question, ctx, max(scores) if scores else 0.0)
 
