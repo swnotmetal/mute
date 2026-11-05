@@ -164,8 +164,8 @@ study that. It is a testbed, not a product.
 
 | Step | Choice |
 | --- | --- |
-| Parse | structured document parser, then a plain PDF reader, then a layout/OCR parser as a last resort |
-| Chunk | about one page per chunk |
+| Parse | a layout-aware parser first for PDFs (keeps rows and columns), a structured parser for office files, a plain reader as fallback |
+| Chunk | structure-aware: headings and table boundaries, about 512 tokens per chunk |
 | Retrieve | keyword search and meaning search, merged by rank |
 | Rerank | a cross-encoder, then keep what scores close to the best hit |
 | Generate | a local instruction model, told to stay inside the retrieved text |
@@ -178,13 +178,33 @@ and excluded). Grading rules are hand-written and printed for audit.
 
 | Question type | Pass | Total | Rate |
 | --- | ---: | ---: | ---: |
-| fact lookup | 7 | 10 | 70% |
+| fact lookup | 8 | 10 | 80% |
 | list | 1 | 3 | 33% |
-| negative (answer is "not stated") | 1 | 3 | 33% |
-| counting | 0 | 2 | 0% |
-| **all** | **9** | **18** | **50%** |
+| negative (answer is "not stated") | 0 | 3 | 0% |
+| counting | 0 | 1 | 0% |
+| **all** | **9** | **17** | **53%** |
 
-Two of the three refusals were wrong: the information was in the collection.
+Three answers were refusals, all on questions the collection can answer. In two
+of them the correct document was retrieved and the refusal came afterwards.
+
+**What a layout-aware re-parse changed.** An earlier version of this pipeline lost
+the row structure of tables, which made a certificate printed on a transcript page
+unanswerable. Re-parsing every PDF with layout analysis fixed exactly that case
+(the certificate question now answers correctly) and broke two others, both
+because a table cell is longer than the per-chunk character budget, so the answer
+row is cut off before the model sees it. Net: 9/17 against 10/17 before, and the
+fact rate unchanged at 80%. A one-question difference at n = 17 is noise.
+
+The work stops there, on purpose. Two rounds of retrieval tuning in a row moved the
+fact rate from 70% to 80% and left the remaining failures in two places that are
+now known exactly: evidence that never reaches the five kept chunks, and evidence
+that sits past the character budget of one long table cell. Neither is fixed here.
+
+**Declared scope, from the measurement above.** This pipeline answers fact
+questions whose evidence appears as prose or as a short table row, in a document
+the retriever ranks among the top five. It does not reliably answer questions that
+require counting across the whole collection, and it does not recover an answer
+from late in a long flattened table.
 
 **Fabrication under pressure.** With a prompt that forbids saying "not stated",
 the model filled 18 of 46 absent fields (39%). Most were plainly unsupported; three

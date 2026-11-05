@@ -39,6 +39,12 @@ from .rerank import Reranker
 
 SUPPORTED = {".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".txt", ".md", ".csv", ".tsv", ".html"}
 OLLAMA = "http://localhost:11434"
+# Bump when the parser changes: the cache name encodes it, so an old pickle can
+# never be silently reused with a different extraction strategy.
+PARSE_VERSION = 2
+# Docling chunks in this tokenizer's units; reuse the reranker's tokenizer so no
+# extra model has to be downloaded.
+TOKENIZER_ID = "BAAI/bge-reranker-v2-m3"
 LLM_CFG = {
     "model": "qwen2.5:7b",
     "model_server": f"{OLLAMA}/v1",
@@ -53,7 +59,7 @@ def collect_files(root: str) -> list[str]:
 
 
 def _cache_path(root: str) -> str:
-    h = hashlib.md5(str(Path(root).resolve()).encode()).hexdigest()[:10]
+    h = hashlib.md5(f"{Path(root).resolve()}|v{PARSE_VERSION}".encode()).hexdigest()[:10]
     return os.path.join(os.path.dirname(__file__), f".parse_cache_{h}.pkl")
 
 
@@ -90,6 +96,52 @@ def _docling_text(path: str) -> str:
         return ""
 
 
+_CHUNKER = None
+
+
+def _docling_chunks(path: str) -> list[dict]:
+    """Layout-aware PDF parsing: Docling reads tables row by row, then its own
+    chunker splits the document along its structure.
+
+    Why the chunker matters: Docling returns ONE markdown string per document, and
+    a whole report in a single chunk is unusable twice over - the embedding model
+    truncates it and the generator's character budget cuts it off. Chunking on
+    headings/sections keeps each table intact and each chunk addressable.
+
+    Returns [] on failure so the caller can fall back to the simpler parsers.
+    """
+    global _DOCLING, _CHUNKER
+    try:
+        from docling.document_converter import DocumentConverter
+        from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
+        from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+        from transformers import AutoTokenizer
+
+        if _DOCLING is None:
+            _DOCLING = DocumentConverter()
+        if _CHUNKER is None:
+            _CHUNKER = HybridChunker(
+                tokenizer=HuggingFaceTokenizer(
+                    tokenizer=AutoTokenizer.from_pretrained(TOKENIZER_ID), max_tokens=512
+                ),
+                merge_peers=True,
+            )
+        doc = _DOCLING.convert(path).document
+        out: list[dict] = []
+        for i, ch in enumerate(_CHUNKER.chunk(doc)):
+            # contextualize() prepends the section headings, so a chunk that only
+            # holds a table still says which section it belongs to.
+            txt = _CHUNKER.contextualize(chunk=ch)
+            if txt.strip():
+                out.append({"content": txt,
+                            "metadata": {"source": path, "chunk_id": f"md-{i}"},
+                            "token": count_tokens(txt)})
+        return out
+    except Exception as e:
+        print(f"[layout] {Path(path).name}: Docling failed ({type(e).__name__}: {e})")
+        return []
+
+
 def _looks_flattened(rec: dict) -> bool:
     """True when the extracted text collapsed into very few long lines.
 
@@ -102,37 +154,56 @@ def _looks_flattened(rec: dict) -> bool:
     return longest > 1000
 
 
+def _with_titles(records: list[dict]) -> list[dict]:
+    """Qwen-Agent's Record requires a title; records built by other parsers may lack it.
+
+    Done on load as well as on write so an existing cache does not have to be
+    rebuilt (a full re-parse is ~25 minutes on CPU).
+    """
+    for r in records:
+        r.setdefault("title", Path(r["url"]).name)
+    return records
+
+
 def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[dict]:
     if os.path.exists(cache_path) and not refresh:
         with open(cache_path, "rb") as f:
-            return pickle.load(f)
+            return _with_titles(pickle.load(f))
 
     parser = DocParser({"max_ref_token": 20000, "parser_page_size": 500})
     records: list[dict] = []
+    n_layout = 0
     for i, f in enumerate(files, 1):
-        try:
-            rec = parser.call({"url": f})
-        except Exception as e:
-            print(f"[skip] {Path(f).name}: {type(e).__name__}: {e}")
-            continue
-        # Scanned PDFs parse to near-empty chunks. Retry with pypdf's text layer;
-        # if that is empty too, drop the document so it cannot occupy a context
-        # slot as a silent blank chunk.
-        # shortcut: no OCR - upgrade to an OCR parser if these files matter.
-        if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]) or _looks_flattened(rec):
-            txt = _pypdf_text(f) if f.lower().endswith(".pdf") else ""
-            if len(txt.strip()) < 50 or _looks_flattened({"raw": [{"content": txt}]}):
-                txt = _docling_text(f)  # layout + tables + OCR; slow, last resort
-                if txt:
-                    print(f"[layout] {Path(f).name}: re-parsed with Docling")
-            if len(txt.strip()) >= 50:
-                # KeywordSearch reads metadata['source'] and ['chunk_id'].
-                rec["raw"] = [{"content": txt,
-                               "metadata": {"source": f, "chunk_id": "fallback-0"},
-                               "token": count_tokens(txt)}]
-            else:
-                print(f"[skip] {Path(f).name}: no extractable text (image only?)")
+        # PDFs go through Docling first: row/column structure is the difference
+        # between an answerable transcript and a wall of concatenated numbers.
+        raw = _docling_chunks(f) if f.lower().endswith(".pdf") else []
+        if raw:
+            n_layout += 1
+            rec = {"url": f, "title": Path(f).name, "raw": raw}
+        else:
+            try:
+                rec = parser.call({"url": f})
+            except Exception as e:
+                print(f"[skip] {Path(f).name}: {type(e).__name__}: {e}")
                 continue
+            # A non-PDF can still come back flattened, and a scanned PDF has no text
+            # layer at all. Retry with pypdf's text layer; if that is empty too, drop
+            # the document so it cannot occupy a context slot as a silent blank chunk.
+            # shortcut: no OCR here - Docling (above) is the OCR path.
+            if all(len((pg.get("content") or "").strip()) < 50 for pg in rec["raw"]) or _looks_flattened(rec):
+                txt = _pypdf_text(f) if f.lower().endswith(".pdf") else ""
+                if len(txt.strip()) < 50 or _looks_flattened({"raw": [{"content": txt}]}):
+                    txt = _docling_text(f)  # layout + tables; slow, last resort
+                    if txt:
+                        print(f"[layout] {Path(f).name}: re-parsed with Docling")
+                if len(txt.strip()) >= 50:
+                    # KeywordSearch reads metadata['source'] and ['chunk_id'].
+                    rec["raw"] = [{"content": txt,
+                                   "metadata": {"source": f, "chunk_id": "fallback-0"},
+                                   "token": count_tokens(txt)}]
+                else:
+                    print(f"[skip] {Path(f).name}: no extractable text (image only?)")
+                    continue
         name = Path(f).name
         # Filename is part of the searchable text (the topic word often lives only in the
         # filename). Split on _ - . so Qwen-Agent's tokenizer sees "phishing" as its own
@@ -144,8 +215,9 @@ def parse_all(files: list[str], cache_path: str, refresh: bool = False) -> list[
         if i % 20 == 0:
             print(f"  parsed {i}/{len(files)}")
 
+    print(f"parsed {len(records)}/{len(files)} files ({n_layout} via the Docling layout parser)")
     with open(cache_path, "wb") as f:
-        pickle.dump(records, f)
+        pickle.dump(_with_titles(records), f)
     return records
 
 

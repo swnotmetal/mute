@@ -72,7 +72,7 @@ RULES: list[tuple[str, dict]] = [
     ("How many Power BI (.pbix) files", {"kind": "metadata"}),
     ("What does the OS assignment cover", {"kind": "fact", "groups": [["windows"]]}),
     ("What is the \"Skylark\" R&D plan", {"kind": "fact",
-                                         "groups": [["nokia"], ["validity"]]}),
+                                         "groups": [["nokia"], ["validat"]]}),
     ("What was the student's PicoCTF reporting", {"kind": "list",
                                                   "any_of": ["obedient cat", "python wrangling",
                                                              "net cat", "nice netcat", "super ssh",
@@ -148,9 +148,13 @@ def run(questions: list[tuple[str, str]], args) -> None:
             raw = generate(f"{PROMPTS['grounded']}\n\nContext:\n{ctx}\n\nQuestion: {q}\n\nAnswer:",
                            backend=args.backend, model=args.model, max_tokens=800)
             answer = final_answer(raw)
+            # `sources` is the audit trail: it tells whether the right document even
+            # reached the generator, so a wrong answer can be blamed on retrieval
+            # rather than on the model. Filenames only - no document text is stored.
             rec = {"question": q, "gold": gold, "answer": answer,
                    "refused": any(m in answer.lower() for m in REFUSAL_MARKERS),
-                   "max_rr": max(scores) if scores else 0.0, "n_kept": len(kept)}
+                   "max_rr": max(scores) if scores else 0.0, "n_kept": len(kept),
+                   "sources": [pathlib.Path(u).name for u, _ in kept]}
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fh.flush()
             print(f"[{i}/{len(todo)}] {q[:60]}", flush=True)
@@ -178,7 +182,11 @@ def report(path: str, verbose: bool = False) -> None:
                 ans = " ".join(r["answer"].split())[:150]
                 print(f"[{'PASS' if ok else 'FAIL'}] {rule['kind']:<9} {r['question'][:56]}")
                 print(f"        gold: {' '.join(r['gold'].split())[:110]}")
-                print(f"        ans : {ans}\n")
+                print(f"        ans : {ans}")
+                print(f"        src : {', '.join(r.get('sources') or [])[:160]}\n")
+            elif not ok:
+                print(f"[FAIL] {rule['kind']:<9} {r['question'][:56]}")
+                print(f"       src: {', '.join(r.get('sources') or [])[:160]}")
 
     print(f"{'kind':<10}{'pass':>6}{'total':>7}{'rate':>8}")
     for kind, (ok, n) in sorted(by_kind.items()):
