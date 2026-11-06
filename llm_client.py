@@ -36,8 +36,15 @@ def base_url(backend: str) -> str:
 
 
 def generate(prompt: str, backend: str = "ollama", model: str | None = None,
-             temperature: float = 0.0, max_tokens: int = 160, timeout: int = 1800) -> str:
-    """Single-turn generation via /v1/chat/completions."""
+             temperature: float = 0.0, max_tokens: int = 160, timeout: int = 1800,
+             meta: dict | None = None) -> str:
+    """Single-turn generation via /v1/chat/completions.
+
+    If `meta` is given it is filled with the diagnostics needed to tell a refusal
+    apart from a truncated or looping response: finish_reason, completion tokens and
+    the raw length. Without them an empty string is ambiguous, and "empty" has been
+    mistaken for "declined" twice in this project.
+    """
     if model is None:
         model = "qwen2.5:7b" if backend == "ollama" else llamacpp_model()
     payload = {
@@ -50,4 +57,14 @@ def generate(prompt: str, backend: str = "ollama", model: str | None = None,
     r = requests.post(f"{base_url(backend)}/v1/chat/completions", json=payload, timeout=timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"HTTP {r.status_code} from {backend} ({model}): {r.text[:600]}")
-    return str(r.json()["choices"][0]["message"]["content"]).strip()
+    choice = r.json()["choices"][0]
+    content = str(choice["message"]["content"]).strip()
+    if meta is not None:
+        usage = r.json().get("usage") or {}
+        meta.update({
+            "finish_reason": choice.get("finish_reason"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "raw_chars": len(content),
+            "has_think_close": "</think>" in content or "<</think>>" in content,
+        })
+    return content

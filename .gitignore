@@ -28,3 +28,8 @@ probe_runs/
 rag_pro/test_questions.txt
 workspace/
 AGENT.md
+excel data/
+
+# scratch runs and captured output
+_*
+*.log

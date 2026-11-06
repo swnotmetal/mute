@@ -96,8 +96,29 @@ class HiddenReader:
     def read(self, context: str, question: str, layer: int = 15,
              pool: str = "last") -> np.ndarray:
         """Return the pooled hidden state at `layer` as a 1-D float32 vector."""
-        if pool not in POOLS:
-            raise ValueError(f"pool must be one of {POOLS}, got {pool!r}")
+        return self.read_pools(context, question, layer, (pool,))[pool]
+
+    def read_pools(self, context: str, question: str, layer: int = 15,
+                   pools: tuple[str, ...] = POOLS) -> dict[str, np.ndarray]:
+        """One forward pass, every requested pooling of it.
+
+        A forward pass costs about 20 s on this CPU build, so reading each pooling
+        separately multiplied the run by four for no reason.
+        """
+        grid = self.read_grid(context, question, (layer,), pools)
+        return {p: grid[(layer, p)] for p in pools}
+
+    def read_grid(self, context: str, question: str, layers: tuple[int, ...],
+                  pools: tuple[str, ...] = POOLS) -> dict[tuple[int, str], np.ndarray]:
+        """One forward pass, every (layer, pooling) pair. Same cost as one read.
+
+        The model already computes all 25 hidden states per forward, so a layer sweep
+        is free once the input has been run - which is why it is worth doing before
+        collecting more data.
+        """
+        for p in pools:
+            if p not in POOLS:
+                raise ValueError(f"pool must be one of {POOLS}, got {p!r}")
         self._load()
         import torch
 
@@ -108,10 +129,17 @@ class HiddenReader:
             return_dict=True, return_tensors="pt").to(self.device)
         with torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
-        # hidden_states[0] is the embedding output, so index == layer number.
-        h = out.hidden_states[layer][0].to(torch.float32).cpu().numpy()
         ids = inputs["input_ids"][0].tolist()
+        grid: dict[tuple[int, str], np.ndarray] = {}
+        for layer in layers:
+            # hidden_states[0] is the embedding output, so index == layer number.
+            h = out.hidden_states[layer][0].to(torch.float32).cpu().numpy()
+            for pool in pools:
+                grid[(layer, pool)] = self._pool(h, ids, question, pool)
+        return grid
 
+    def _pool(self, h: np.ndarray, ids: list[int], question: str,
+              pool: str) -> np.ndarray:
         if pool == "last":
             return h[-1]
         if pool == "all":
@@ -155,8 +183,13 @@ def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
 
 
 def cv_auroc(x: np.ndarray, y: np.ndarray, folds: int = 5, l2: float = 1.0,
-             seed: int = 0) -> float:
-    """Folds are shuffled once; every sample is scored by a probe that never saw it."""
+             seed: int = 0, pca: int | None = None) -> float:
+    """Folds are shuffled once; every sample is scored by a probe that never saw it.
+
+    `pca` projects each fold onto its own principal components, fitted on the training
+    part only. With n around 40 and d = 1024 a raw linear probe cannot be fitted at
+    all, so this is not an optimisation - without it every result is a coin flip.
+    """
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(y))
     scores = np.zeros(len(y))
@@ -165,7 +198,16 @@ def cv_auroc(x: np.ndarray, y: np.ndarray, folds: int = 5, l2: float = 1.0,
         train = np.setdiff1d(order, test)
         if len(np.unique(y[train])) < 2:
             continue
-        scores[test] = ridge_scores(x[train], y[train], x[test], l2=l2)
+        xt, xv = x[train], x[test]
+        if pca:
+            mu = xt.mean(axis=0)
+            centred = xt - mu
+            _u, _s, vt = np.linalg.svd(centred, full_matrices=False)
+            comp = min(pca, vt.shape[0])
+            basis = vt[:comp]
+            xt = centred @ basis.T
+            xv = (xv - mu) @ basis.T
+        scores[test] = ridge_scores(xt, y[train], xv, l2=l2)
     return auroc(scores, y)
 
 
@@ -211,9 +253,15 @@ def main() -> None:
     ap.add_argument("--labels", help="labels.jsonl (question/label) to retrieve context for")
     ap.add_argument("--dir", help="corpus directory (with --labels)")
     ap.add_argument("--layer", type=int, default=15)
+    ap.add_argument("--layers", default="",
+                    help="comma separated layers for a sweep; free, one forward each")
     ap.add_argument("--pools", default=",".join(POOLS))
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--l2", type=float, default=1.0)
+    ap.add_argument("--pca", type=int, default=15,
+                    help="components per fold; needed when n is small (0 disables)")
+    ap.add_argument("--permutations", type=int, default=20,
+                    help="shuffled-label runs, to show what chance looks like at this n")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--allow-download", action="store_true")
     ap.add_argument("--out", default="probe_runs/pool_eval.json")
@@ -230,21 +278,41 @@ def main() -> None:
         dataset = dataset[:args.limit]
 
     pools = [p.strip() for p in args.pools.split(",") if p.strip()]
+    layers = [int(x) for x in args.layers.split(",") if x.strip()] if args.layers else [args.layer]
     reader = HiddenReader(allow_download=args.allow_download)
+    feats: dict[tuple[int, str], list[np.ndarray]] = {
+        (l, p): [] for l in layers for p in pools}
+    for i, d in enumerate(dataset, 1):
+        grid = reader.read_grid(d["context"], d["question"], tuple(layers),
+                                tuple(pools))
+        for key, vec in grid.items():
+            feats[key].append(vec)
+        if i % 10 == 0:
+            print(f"  extracted {i}/{len(dataset)}", flush=True)
+
     table: dict[str, float] = {}
-    for pool in pools:
-        feats = [reader.read(d["context"], d["question"], layer=args.layer, pool=pool)
-                 for d in dataset]
-        x, y = np.array(feats), np.array([d["label"] for d in dataset])
-        table[pool] = cv_auroc(x, y, folds=args.folds, l2=args.l2)
-        print(f"{pool:<10} CV-AUROC {table[pool]:.3f}   (n={len(y)}, dim={x.shape[1]})",
-              flush=True)
+    chance: dict[str, float] = {}
+    y = np.array([d["label"] for d in dataset])
+    for key in feats:
+        x = np.array(feats[key])
+        name = f"L{key[0]}/{key[1]}"
+        table[name] = cv_auroc(x, y, folds=args.folds, l2=args.l2, pca=args.pca or None)
+        # Same pipeline on shuffled labels: with n this small an AUROC of 0.7 can be
+        # ordinary noise, and this is the only honest way to say so.
+        perm = [cv_auroc(x, np.random.default_rng(s).permutation(y),
+                         folds=args.folds, l2=args.l2, pca=args.pca or None)
+                for s in range(args.permutations)]
+        chance[name] = float(np.mean(perm)) + float(np.std(perm))
+        print(f"{name:<14} CV-AUROC {table[name]:.3f}   "
+              f"chance+1sd {chance[name]:.3f}   "
+              f"(n={len(y)}, pos={int(y.sum())}, pca={args.pca})", flush=True)
 
     print(f"\nlayer {args.layer}, {args.folds}-fold CV, L2={args.l2}")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump({"layer": args.layer, "folds": args.folds, "l2": args.l2,
-                   "n": len(dataset), "auroc": table}, f, indent=2)
+                   "pca": args.pca, "n": len(dataset), "auroc": table,
+                   "chance": chance}, f, indent=2)
     print(f"wrote {args.out}")
     print("NOTE: n is small. Report the number and its n, never the number alone.",
           file=sys.stderr)
