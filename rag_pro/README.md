@@ -110,3 +110,14 @@ Optional: `--no-rerank` to skip the second stage, `--top-k` and
 - Images, diagrams, spreadsheets of pictures and video cannot be read at all.
 - The generator can still add unsupported detail. Check the answer against the
   retrieved text before trusting it.
+
+## What this implies for reducing hallucination
+
+- **Fix the text layer first.** Every failure traced here came from parsing or from a
+  budget, not from the model: a table flattened into a single line, and an answer at
+  character 1367 of a 1693-character chunk cut by a 1200-character cap. The context
+  the model received did not contain the answer, and refusing was the correct output.
+- **Do not send counting, ranking or aggregation questions to a retriever.** These
+  need a table, not five chunks.
+- **Keep an abstain path, and check the answer against the retrieved text.** A small
+  entailment model covers most of that check; nothing here needed hidden states.

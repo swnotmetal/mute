@@ -130,6 +130,35 @@ Recorded because they were argued for and then measured:
 3. Absence alone drives fabrication. It needs absence that is *invisible*: with a
    small table on screen and the asked row visibly missing, 94% of answers refuse.
 
+## What this implies for reducing hallucination
+
+Five things the data supports, ordered by how much they change the outcome.
+
+**1. The lever is on the input side.** The same model, on the same prompt family,
+fabricated 39% of the time when the missing field was invisible in a wall of prose,
+and 6% of the time when a five-row table on screen visibly lacked the asked row.
+Nothing about the model changed. Make the absence visible before asking the model to
+be honest.
+
+**2. A refusal channel is cheaper than truthfulness.** Allowing "not stated" removed
+almost all fabrication here: 94/100 refusals even while abstaining was explicitly
+forbidden, and 99/100 correct when the row was present. Permit null, and say so in
+the schema.
+
+**3. Check the question against the schema before checking the answer against the
+text.** Five of seven ranking questions produced a fabricated rank, because the sheet
+has no sales column at all. That is detectable without a model: does the column the
+question needs exist? A *generic* checker failed (precision 0.33); the useful version
+is generated per schema, not written once.
+
+**4. Route before you generate.** "Top three by sales" and "how many rows" are SQL
+questions. Sending them to a document retriever is the root cause here, not decoding.
+
+**5. Layer the constraints instead of looking for one clever gate.** Input
+completeness, then schema shape, then an entailment check — a 0.1B model reached 83%
+recall with no false alarms. A hidden-state probe belongs in the last box, and on
+this data is not needed to fill it.
+
 ## Prior work
 
 The two central ideas here are not new, and the repository is a replication with
