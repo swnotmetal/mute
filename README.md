@@ -178,16 +178,40 @@ To reproduce the results:
 
 Exact dependencies are pinned in [`requirements.txt`](./requirements.txt); hardware requirements and execution times are noted in the notebook.
 
-## Limitations and Next Steps
+## What this implies for reducing hallucination
 
-The next stage is to determine whether the observed signal generalizes beyond the constructed examples.
+The probe answers one narrow question well: is the evidence for this answer present
+in the window the model is reading? That is worth having, and it is not the same as
+solving hallucination. What the measurement supports:
 
-1. **Wider evaluation:** CUAD is one domain; test across more document types (emails, tickets, RAG evidence) to see where the signal holds — and where it quietly gives up.
-2. **Robustness testing:** Vary wording, entity names, distractor numbers, dates, and source attribution.
-3. **Better metrics:** Report precision, recall, false-positive rate, and threshold sensitivity, alongside accuracy.
-4. **Baseline comparisons:** Compare against simple text-based classifiers and relevant abstention or verification methods.
-5. **Actual early-exit inference:** Implement a forward pass that stops at the selected layer, then benchmark end-to-end latency, throughput, and memory.
-6. **Broader task evaluation:** Investigate whether the approach extends to RAG evidence sufficiency or other narrowly defined reliability tasks.
+**1. A refusal channel is the cheapest intervention.** Separating "the answer is in
+this window" from "it is not" is a classification problem the model's own states
+solve well (0.950 blind-test AUROC). Permitting the model to decline, and having a
+cheap signal that says when it should, beats trying to make generation more truthful.
+
+**2. Presence of evidence is not the same as quality of answer.** The probe reads
+whether support exists, not whether the answer went on to use it. A pipeline that
+gates on presence still passes answers that are unsupported in detail.
+
+**3. Detection must run before generation to be useful.** Every method that inspects
+the finished answer is a filter, not a gate: it can hide a wrong answer but cannot
+prevent the cost of producing it. That is the only structural argument for a
+hidden-state signal over an entailment model.
+
+**4. The layer and token position matter, and this is not settled here.** The sweep
+selects layer 14 on the training split and layer 15 in the runtime demonstration;
+both are draws from a 24-layer sweep, and the published ablation work on
+single-generation hidden states suggests the choice is task dependent.
+
+**5. Constraints belong in layers, not in one gate.** Input completeness, then output
+shape, then an entailment check. A probe is one layer of that stack, and the cheapest
+layer usually does most of the work.
+
+The follow-up branch (`rag-experiment`) tested points 1–3 on a real document
+pipeline. The result is worth recording here: on that data the signal had almost
+nothing to detect, because six of eight remaining failures happened before the model
+spoke — evidence cut by a chunk budget, or the right document never retrieved. The
+practical lessons from that branch are on that branch.
 
 ## Final Thought
 
