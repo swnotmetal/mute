@@ -159,6 +159,23 @@ completeness, then schema shape, then an entailment check — a 0.1B model reach
 recall with no false alarms. A hidden-state probe belongs in the last box, and on
 this data is not needed to fill it.
 
+### Order to do it in
+
+Ranked by payoff per unit of work, for a system that has to ship:
+
+| Priority | Intervention | Evidence here | Cost |
+| --- | --- | --- | --- |
+| **P0** | Allow abstention; make `null` a first-class value in the output schema | 94/100 refusals even when abstaining was forbidden; 99/100 controls correct | one prompt line |
+| **P0** | Route before generating: counting, ranking and aggregation go to a database, not a retriever | ranking questions fabricated 5/7, and every one of those was really a routing failure | one small classifier |
+| **P1** | Make absence visible — keep table rows and columns, do not cut the context before the answer | 39% → 6% fabricated, with no change to the model | parsing work |
+| **P1** | Check the question against the schema before checking the answer against the text | every "list ten / all five / all four" item asserted a count the data contradicts | rules generated per schema |
+| **P2** | Check the finished answer against the retrieved text (entailment model) | 83% recall, 0/3 false alarms | a 0.1B model |
+| **P3** | Hidden-state probe as a pre-generation gate | 0.950 on constructed data; nothing to detect on a real pipeline | needs activation access |
+
+P3 is last because it is expensive and already covered, not because it is wrong:
+CRAG (2024) gets the same gate from a small T5 evaluator, and six of the eight
+remaining failures on the document pipeline happened before the model spoke.
+
 ## Prior work
 
 The two central ideas here are not new, and the repository is a replication with
